@@ -5,8 +5,8 @@ metadata:
 spec:
   targetNamespace: test-ns
   action: Resume
-  operationId: "op-20231215-010"
+  operationId: "op-20231215-011"
   selector:
     matchLabels:
-      app: test1
+      app: test
   startupPolicy: Ignore

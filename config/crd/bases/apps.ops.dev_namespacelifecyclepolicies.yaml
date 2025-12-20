@@ -208,6 +208,23 @@ spec:
                   lastHandledOperationId stores the operation ID of the last successfully handled operation.
                   This helps track which operations have been processed by the controller.
                 type: string
+              lastStartupAction:
+                description: |-
+                  lastStartupAction records the action taken during the last startup policy check
+                  Possible values:
+                  - FREEZE_APPLIED - Startup policy froze the namespace
+                  - RESUME_APPLIED - Startup policy resumed the namespace
+                  - NO_ACTION_ALREADY_FROZEN - Already frozen, no action needed
+                  - NO_ACTION_ALREADY_RESUMED - Already resumed, no action needed
+                  - SKIPPED_IGNORE - StartupPolicy is set to Ignore
+                  - SKIPPED_NAMESPACE_NOT_FOUND - Target namespace doesn't exist
+                type: string
+              lastStartupAt:
+                description: |-
+                  lastStartupAt stores the timestamp when startup policy was last checked
+                  This is updated every time the operator starts and evaluates the startup policy
+                format: date-time
+                type: string
               message:
                 description: |-
                   message provides a human-readable message about the current status.

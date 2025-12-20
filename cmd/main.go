@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -31,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -50,6 +52,43 @@ func init() {
 
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// applyStartupPolicies applies startup policies for all existing NamespaceLifecyclePolicy resources
+// This runs once when the operator starts, before the controller starts processing events
+func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
+	setupLog := ctrl.Log.WithName("startup")
+	setupLog.Info("Applying startup policies for existing resources")
+
+	// Create a client
+	k8sClient := mgr.GetClient()
+
+	// List all NamespaceLifecyclePolicy resources
+	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
+	if err := k8sClient.List(ctx, policyList); err != nil {
+		setupLog.Error(err, "Failed to list NamespaceLifecyclePolicy resources")
+		return err
+	}
+
+	setupLog.Info("Found policies", "count", len(policyList.Items))
+
+	// Create reconciler instance to use helper functions
+	reconciler := &controller.NamespaceLifecyclePolicyReconciler{
+		Client: k8sClient,
+		Scheme: mgr.GetScheme(),
+	}
+
+	// Apply startup policy for each resource
+	for i := range policyList.Items {
+		policy := &policyList.Items[i]
+		if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
+			setupLog.Error(err, "Failed to apply startup policy", "policy", policy.Name)
+			// Continue with other policies even if one fails
+		}
+	}
+
+	setupLog.Info("Startup policy check completed")
+	return nil
 }
 
 // nolint:gocyclo
@@ -193,6 +232,24 @@ func main() {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
+		os.Exit(1)
+	}
+
+	// Add startup policy runnable - will run after cache is started
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		// Wait for cache to sync
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			setupLog.Error(nil, "Failed to wait for cache sync")
+			return nil // Don't fail the manager
+		}
+
+		// Apply startup policies
+		if err := applyStartupPolicies(ctx, mgr); err != nil {
+			setupLog.Error(err, "Failed to apply startup policies")
+		}
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add startup policy runnable")
 		os.Exit(1)
 	}
 

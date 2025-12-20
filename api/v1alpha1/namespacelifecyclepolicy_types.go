@@ -144,6 +144,22 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
+	// lastStartupAt stores the timestamp when startup policy was last checked
+	// This is updated every time the operator starts and evaluates the startup policy
+	// +optional
+	LastStartupAt *metav1.Time `json:"lastStartupAt,omitempty"`
+
+	// lastStartupAction records the action taken during the last startup policy check
+	// Possible values:
+	// - FREEZE_APPLIED - Startup policy froze the namespace
+	// - RESUME_APPLIED - Startup policy resumed the namespace
+	// - NO_ACTION_ALREADY_FROZEN - Already frozen, no action needed
+	// - NO_ACTION_ALREADY_RESUMED - Already resumed, no action needed
+	// - SKIPPED_IGNORE - StartupPolicy is set to Ignore
+	// - SKIPPED_NAMESPACE_NOT_FOUND - Target namespace doesn't exist
+	// +optional
+	LastStartupAction string `json:"lastStartupAction,omitempty"`
+
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//

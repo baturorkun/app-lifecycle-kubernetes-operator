@@ -213,6 +213,137 @@ func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, p
 	return r.Status().Update(ctx, policy)
 }
 
+// ApplyStartupPolicy applies the startup policy action to the namespace
+// This is called once during operator startup for each policy
+func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
+	log := logf.FromContext(ctx)
+
+	// Record timestamp - set this at the very beginning
+	now := metav1.Now()
+	policy.Status.LastStartupAt = &now
+
+	// Skip if startup policy is Ignore
+	if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyIgnore {
+		policy.Status.LastStartupAction = "SKIPPED_IGNORE"
+		r.Status().Update(ctx, policy)
+		log.Info("Startup policy check: no action needed",
+			"policy", policy.Name,
+			"startupPolicy", "Ignore",
+			"reason", "Policy is set to Ignore")
+		return nil
+	}
+
+	// Determine desired phase based on startup policy
+	var desiredPhase appsv1alpha1.Phase
+	var action appsv1alpha1.LifecycleAction
+	if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyFreeze {
+		desiredPhase = appsv1alpha1.PhaseFrozen
+		action = appsv1alpha1.LifecycleActionFreeze
+	} else if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyResume {
+		desiredPhase = appsv1alpha1.PhaseResumed
+		action = appsv1alpha1.LifecycleActionResume
+	} else {
+		policy.Status.LastStartupAction = "SKIPPED_UNKNOWN_POLICY"
+		r.Status().Update(ctx, policy)
+		log.Info("Startup policy check: no action needed",
+			"policy", policy.Name,
+			"startupPolicy", policy.Spec.StartupPolicy,
+			"reason", "Unknown startup policy value")
+		return nil
+	}
+
+	// Check if already in desired phase
+	if policy.Status.Phase == desiredPhase {
+		if desiredPhase == appsv1alpha1.PhaseFrozen {
+			policy.Status.LastStartupAction = "NO_ACTION_ALREADY_FROZEN"
+		} else {
+			policy.Status.LastStartupAction = "NO_ACTION_ALREADY_RESUMED"
+		}
+		r.Status().Update(ctx, policy)
+		log.Info("Startup policy check: no action needed",
+			"policy", policy.Name,
+			"startupPolicy", policy.Spec.StartupPolicy,
+			"currentPhase", policy.Status.Phase,
+			"reason", "Already in desired state")
+		return nil
+	}
+
+	log.Info("Applying startup policy",
+		"policy", policy.Name,
+		"startupPolicy", policy.Spec.StartupPolicy,
+		"currentPhase", policy.Status.Phase,
+		"desiredPhase", desiredPhase,
+		"targetNamespace", policy.Spec.TargetNamespace)
+
+	// Check if target namespace exists
+	namespace := &corev1.Namespace{}
+	if err := r.Get(ctx, client.ObjectKey{Name: policy.Spec.TargetNamespace}, namespace); err != nil {
+		if errors.IsNotFound(err) {
+			policy.Status.LastStartupAction = "SKIPPED_NAMESPACE_NOT_FOUND"
+			r.Status().Update(ctx, policy)
+			log.Info("Startup policy check: no action needed",
+				"policy", policy.Name,
+				"targetNamespace", policy.Spec.TargetNamespace,
+				"reason", "Target namespace not found")
+			return nil // Don't fail, just skip
+		}
+		return err
+	}
+
+	// List resources
+	deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+	if err != nil {
+		log.Error(err, "Failed to list deployments during startup")
+		return err
+	}
+
+	statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+	if err != nil {
+		log.Error(err, "Failed to list statefulsets during startup")
+		return err
+	}
+
+	log.Info("Startup policy: found resources",
+		"deployments", len(deployments.Items),
+		"statefulsets", len(statefulSets.Items))
+
+	// Apply action
+	if action == appsv1alpha1.LifecycleActionFreeze {
+		for i := range deployments.Items {
+			deployment := &deployments.Items[i]
+			if err := r.freezeDeployment(ctx, deployment); err != nil {
+				log.Error(err, "Failed to freeze deployment during startup", "name", deployment.Name)
+			}
+		}
+		for i := range statefulSets.Items {
+			sts := &statefulSets.Items[i]
+			if err := r.freezeStatefulSet(ctx, sts); err != nil {
+				log.Error(err, "Failed to freeze statefulset during startup", "name", sts.Name)
+			}
+		}
+		policy.Status.LastStartupAction = "FREEZE_APPLIED"
+		log.Info("Startup policy applied: frozen", "policy", policy.Name)
+	} else if action == appsv1alpha1.LifecycleActionResume {
+		for i := range deployments.Items {
+			deployment := &deployments.Items[i]
+			if err := r.resumeDeployment(ctx, deployment); err != nil {
+				log.Error(err, "Failed to resume deployment during startup", "name", deployment.Name)
+			}
+		}
+		for i := range statefulSets.Items {
+			sts := &statefulSets.Items[i]
+			if err := r.resumeStatefulSet(ctx, sts); err != nil {
+				log.Error(err, "Failed to resume statefulset during startup", "name", sts.Name)
+			}
+		}
+		policy.Status.LastStartupAction = "RESUME_APPLIED"
+		log.Info("Startup policy applied: resumed", "policy", policy.Name)
+	}
+
+	// Update status after applying
+	return r.Status().Update(ctx, policy)
+}
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // This implementation handles freezing/resuming Deployments and StatefulSets
