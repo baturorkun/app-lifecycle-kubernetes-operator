@@ -1,131 +1,353 @@
-# app-lifecycle-kubernetes-operator
-This operator manages the lifecycle of applications within a namespace, ensuring graceful shutdown and controlled, balanced startup of Deployments and StatefulSets during events like node maintenance.
+# App Lifecycle Kubernetes Operator
 
-## Description
-The App Lifecycle Kubernetes Operator provides a robust mechanism for managing application lifecycles at the namespace level. When a node needs to be drained for maintenance or other reasons, simply cordoning the node is often not enough to ensure zero downtime or graceful handling of stateful applications. This operator introduces the `NamespaceLifecyclePolicy` Custom Resource Definition (CRD) to address this challenge. By creating a `NamespaceLifecyclePolicy` resource, you can define strategies for gracefully terminating Deployments and StatefulSets within a specific namespace. The operator watches for these policies and, when triggered (e.g., by a node event or manual annotation), orchestrates a graceful shutdown of the workloads. Subsequently, it ensures that the pods are rescheduled and started in a controlled manner, aiming for a balanced distribution across the available nodes in the cluster. This prevents "thundering herd" problems and ensures high availability for your applications.
+A Kubernetes operator that manages the lifecycle of applications within namespaces by freezing and resuming Deployments and StatefulSets. Perfect for scheduled maintenance, cost optimization, and ensuring consistent application state across operator restarts.
 
-## Getting Started
+## Features
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+### 🎯 Freeze & Resume Operations
+- **Freeze**: Scale down all (or selected) Deployments and StatefulSets to 0 replicas
+- **Resume**: Restore original replica counts from stored annotations
+- Supports label selectors to target specific workloads
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+### 🔄 Smart Startup Policy
+When the operator starts (restart, node reboot, upgrade):
+- **Smart Reconciliation**: Only applies action if current state differs from desired state
+- **Idempotent**: Safe to run multiple times, won't duplicate operations
+- **Status Tracking**: Records timestamp and action in resource status
 
-```sh
-make docker-build docker-push IMG=<some-registry>/app-lifecycle-kubernetes-operator:tag
+### 🎫 Operation Idempotency
+- Prevents duplicate operations using `operationId`
+- Change the `operationId` to trigger a new operation
+- Status tracks last processed operation ID
+
+### 🏷️ Label Selector Support
+Filter which Deployments and StatefulSets to affect:
+```yaml
+selector:
+  matchLabels:
+    app: myapp
+  matchExpressions:
+  - key: tier
+    operator: In
+    values: [frontend, backend]
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+### 📊 Comprehensive Status Tracking
+- **Phase**: Current lifecycle state (Idle, Freezing, Frozen, Resuming, Resumed, Failed)
+- **Message**: Human-readable status messages
+- **LastHandledOperationId**: Tracks processed operations
+- **LastStartupAt**: When operator last checked startup policy
+- **LastStartupAction**: What action was taken at startup
 
-**Install the CRDs into the cluster:**
+## Quick Start
 
+### Installation
+
+**Option 1: Run locally (recommended for development)**
+```sh
+make install  # Install CRDs
+make run      # Run operator locally
+```
+
+**Option 2: Deploy to cluster**
 ```sh
 make install
+make deploy IMG=<your-registry>/app-lifecycle-kubernetes-operator:tag
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
-
+**Create a sample policy:**
 ```sh
-make deploy IMG=<some-registry>/app-lifecycle-kubernetes-operator:tag
+kubectl apply -f config/samples/apps_v1alpha1_namespacelifecyclepolicy.yaml
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+For detailed installation instructions, deployment options, and troubleshooting, see [INSTALL.md](INSTALL.md).
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+## Usage Examples
 
+### Example 1: Freeze a Namespace (All Resources)
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: freeze-production
+  namespace: default
+spec:
+  targetNamespace: production
+  action: Freeze
+  operationId: "op-20231215-001"
+  startupPolicy: Ignore
+```
+
+This will:
+- Freeze ALL Deployments and StatefulSets in the `production` namespace
+- Store original replica counts in annotations
+- Set `startupPolicy: Ignore` means no action on operator restart
+
+### Example 2: Resume with Startup Policy
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: resume-dev
+  namespace: default
+spec:
+  targetNamespace: dev
+  action: Resume
+  operationId: "op-20231215-002"
+  startupPolicy: Resume
+```
+
+This will:
+- Resume all frozen Deployments/StatefulSets in `dev` namespace
+- On operator restart, automatically resume if namespace is frozen
+- Smart: Only resumes if current state differs from desired state
+
+### Example 3: Freeze Specific Apps Using Selector
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: freeze-selected
+  namespace: default
+spec:
+  targetNamespace: staging
+  action: Freeze
+  operationId: "op-20231215-003"
+  startupPolicy: Freeze
+  selector:
+    matchLabels:
+      app: web-app
+      tier: frontend
+```
+
+This will:
+- Only freeze Deployments/StatefulSets with matching labels
+- On operator restart, ensures they remain frozen
+
+### Example 4: Scheduled Freeze for Cost Savings
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: nightly-freeze
+  namespace: default
+spec:
+  targetNamespace: test-environment
+  action: Freeze
+  operationId: "nightly-2023121500"  # Change daily via CronJob
+  startupPolicy: Ignore
+```
+
+Use with a CronJob to freeze test environments overnight:
+- Change `operationId` daily to trigger new freeze operation
+- `startupPolicy: Ignore` prevents auto-resume on operator restart
+
+## API Reference
+
+### NamespaceLifecyclePolicySpec
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `targetNamespace` | string | Yes | The namespace to apply this policy to |
+| `action` | enum | Yes | `Freeze` or `Resume` |
+| `operationId` | string | No | Unique ID for operation idempotency |
+| `startupPolicy` | enum | Yes | `Ignore`, `Freeze`, or `Resume` - action on operator startup |
+| `selector` | LabelSelector | No | Filter resources by labels (all if omitted) |
+
+### NamespaceLifecyclePolicyStatus
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | enum | Current phase: `Idle`, `Freezing`, `Frozen`, `Resuming`, `Resumed`, `Failed` |
+| `lastHandledOperationId` | string | Last processed operation ID |
+| `message` | string | Human-readable status message |
+| `lastStartupAt` | timestamp | When startup policy was last checked |
+| `lastStartupAction` | string | Action taken at startup (e.g., `FREEZE_APPLIED`, `NO_ACTION_ALREADY_FROZEN`) |
+| `conditions` | []Condition | Kubernetes standard conditions (reserved for future use) |
+
+### Startup Policy Actions
+
+When the operator starts, it checks each policy's `startupPolicy`:
+
+| startupPolicy | Current Phase | Action |
+|---------------|---------------|--------|
+| `Ignore` | Any | No action taken |
+| `Freeze` | `Frozen` | No action (already frozen) ✅ |
+| `Freeze` | `Resumed` | Freeze namespace 🥶 |
+| `Resume` | `Resumed` | No action (already resumed) ✅ |
+| `Resume` | `Frozen` | Resume namespace ▶️ |
+
+Status records the result in `lastStartupAction`:
+- `FREEZE_APPLIED` - Froze the namespace
+- `RESUME_APPLIED` - Resumed the namespace
+- `NO_ACTION_ALREADY_FROZEN` - Already in frozen state
+- `NO_ACTION_ALREADY_RESUMED` - Already in resumed state
+- `SKIPPED_IGNORE` - StartupPolicy set to Ignore
+- `SKIPPED_NAMESPACE_NOT_FOUND` - Target namespace doesn't exist
+
+## How It Works
+
+### Freeze Operation
+1. Lists all Deployments and StatefulSets in target namespace (filtered by selector if provided)
+2. For each resource:
+   - Stores current replica count in annotation `apps.ops.dev/original-replicas`
+   - Sets replicas to 0
+3. Updates status to `Frozen`
+4. Records `operationId` to prevent duplicate operations
+
+### Resume Operation
+1. Lists all Deployments and StatefulSets in target namespace
+2. For each resource:
+   - Reads original replica count from annotation
+   - Restores original replica count
+   - Removes the annotation
+3. Updates status to `Resumed`
+
+### Startup Reconciliation
+When operator starts:
+1. Reads all NamespaceLifecyclePolicy resources
+2. For each policy:
+   - Checks `startupPolicy` field
+   - Compares current `phase` with desired state
+   - Only applies action if states differ (smart reconciliation)
+   - Updates `lastStartupAt` timestamp
+   - Records action in `lastStartupAction`
+
+## Monitoring
+
+Check policy status:
 ```sh
-kubectl apply -k config/samples/
+kubectl get namespacelifecyclepolicy -A
+kubectl describe namespacelifecyclepolicy freeze-production
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
+View detailed status:
 ```sh
-kubectl delete -k config/samples/
+kubectl get namespacelifecyclepolicy freeze-production -o yaml
 ```
 
-**Delete the APIs(CRDs) from the cluster:**
+Example output:
+```yaml
+status:
+  phase: Frozen
+  message: Successfully processed NamespaceLifecyclePolicy
+  lastHandledOperationId: "op-20231215-001"
+  lastStartupAt: "2025-12-21T00:25:13Z"
+  lastStartupAction: "NO_ACTION_ALREADY_FROZEN"
+```
 
+## Development
+
+**Quick development workflow:**
 ```sh
-make uninstall
+make install   # Install CRDs
+make run       # Run operator locally
+make test      # Run tests
 ```
 
-**UnDeploy the controller from the cluster:**
-
+**After modifying API types:**
 ```sh
-make undeploy
+make generate  # Update generated code
+make manifests # Update CRD manifests
+make install   # Re-install CRDs
 ```
 
-## Project Distribution
+For detailed development workflow, building images, and deployment options, see [INSTALL.md](INSTALL.md).
 
-Following the options to release and provide this solution to the users.
+## Use Cases
 
-### By providing a bundle with all YAML files
+### 1. Scheduled Environment Shutdown
+Save costs by freezing dev/test environments during off-hours.
 
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/app-lifecycle-kubernetes-operator:tag
+**Freeze policy (triggered at 6 PM):**
+```yaml
+spec:
+  targetNamespace: dev-environment
+  action: Freeze
+  operationId: "freeze-20231215-1800"
+  startupPolicy: Ignore
 ```
 
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/app-lifecycle-kubernetes-operator/<tag or branch>/dist/install.yaml
+**Resume policy (triggered at 8 AM):**
+```yaml
+spec:
+  targetNamespace: dev-environment
+  action: Resume
+  operationId: "resume-20231216-0800"
+  startupPolicy: Resume  # Auto-resume if operator restarts
 ```
 
-### By providing a Helm Chart
+Use a CronJob to update the operationId and trigger these policies at scheduled times.
 
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
+### 2. Node Maintenance
+Gracefully freeze workloads before node maintenance:
+```yaml
+spec:
+  targetNamespace: production
+  action: Freeze
+  operationId: "maintenance-20231215"
+  startupPolicy: Freeze  # Keep frozen if operator restarts during maintenance
 ```
 
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
+### 3. Disaster Recovery Testing
+Freeze production-like environments for backup/snapshot testing:
+```yaml
+spec:
+  targetNamespace: prod-replica
+  action: Freeze
+  operationId: "dr-test-001"
+  selector:
+    matchLabels:
+      backup-enabled: "true"
+  startupPolicy: Freeze
+```
 
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
+### 4. Canary Deployments
+Freeze old version while testing new version:
+```yaml
+spec:
+  targetNamespace: production
+  action: Freeze
+  selector:
+    matchLabels:
+      version: "v1"
+  startupPolicy: Ignore
+```
+
+## Troubleshooting
+
+**Policy not taking effect:**
+- Check if `operationId` is the same as last run (change it to trigger new operation)
+- Verify target namespace exists
+- Check operator logs: `kubectl logs -n <operator-namespace> <pod-name>`
+
+**Resources not frozen/resumed:**
+- Check selector matches your resources: `kubectl get deploy,sts -n <namespace> --show-labels`
+- Verify RBAC permissions are correct
+- Check status message for errors
+
+**Startup policy not working:**
+- Verify `startupPolicy` is set (required field)
+- Check `lastStartupAt` and `lastStartupAction` in status
+- Operator only checks on startup, not during runtime
 
 ## Contributing
-We welcome contributions from the community! If you'd like to contribute to this project, please follow these guidelines:
 
-1.  **Reporting Bugs:** If you find a bug, please open an issue in the GitHub repository. Include a clear title, a detailed description of the issue, steps to reproduce it, and any relevant logs or error messages.
-2.  **Suggesting Enhancements:** For new features or improvements, please open an issue to discuss your ideas before submitting a pull request. This allows us to align on the design and implementation.
-3.  **Pull Requests:**
-    *   Fork the repository and create a new branch for your feature or bug fix.
-    *   Ensure your code follows the existing style and conventions.
-    *   Add or update tests as appropriate.
-    *   Make sure all tests pass by running `make test`.
-    *   Update the documentation (`README.md`, etc.) if your changes affect it.
-    *   Submit a pull request with a clear description of your changes.
+We welcome contributions! To contribute:
 
-**NOTE:** Run `make help` for more information on all potential `make` targets
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Add tests and run `make test`
+5. Update documentation if needed
+6. Run `make manifests` to update CRDs
+7. Submit a pull request
 
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+For detailed guidelines, see [INSTALL.md](INSTALL.md#development-workflow).
 
 ## License
 

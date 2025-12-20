@@ -4,9 +4,9 @@ metadata:
   name: freeze-production
 spec:
   targetNamespace: test-ns
-  action: Resume
-  operationId: "op-20231215-011"
+  action: Freeze
+  operationId: "op-20231215-012"
   selector:
     matchLabels:
       app: test
-  startupPolicy: Ignore
+  startupPolicy: Resume
