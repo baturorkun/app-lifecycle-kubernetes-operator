@@ -23,6 +23,60 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// LifecycleAction defines the lifecycle operation action
+// +kubebuilder:validation:Enum=Freeze;Resume
+type LifecycleAction string
+
+const (
+	// LifecycleActionFreeze indicates that the namespace should be frozen
+	LifecycleActionFreeze LifecycleAction = "Freeze"
+
+	// LifecycleActionResume indicates that the namespace should be resumed
+	LifecycleActionResume LifecycleAction = "Resume"
+)
+
+// StartupPolicy defines the startup behavior policy
+// +kubebuilder:validation:Enum=Ignore;Resume;Freeze
+type StartupPolicy string
+
+const (
+	// StartupPolicyIgnore indicates no action should be taken at startup
+	StartupPolicyIgnore StartupPolicy = "Ignore"
+
+	// StartupPolicyResume indicates the namespace should resume at startup
+	StartupPolicyResume StartupPolicy = "Resume"
+
+	// StartupPolicyFreeze indicates the namespace should be frozen at startup
+	StartupPolicyFreeze StartupPolicy = "Freeze"
+)
+
+// Phase defines the current phase of the namespace lifecycle operation
+// +kubebuilder:validation:Enum=Idle;Freezing;Frozen;Resuming;Resumed;Failed
+type Phase string
+
+const (
+	// PhaseIdle indicates no operation is in progress
+	PhaseIdle Phase = "Idle"
+
+	// PhaseFreezing indicates the namespace is being frozen
+	PhaseFreezing Phase = "Freezing"
+
+	// PhaseFrozen indicates the namespace is frozen
+	PhaseFrozen Phase = "Frozen"
+
+	// PhaseResuming indicates the namespace is being resumed
+	PhaseResuming Phase = "Resuming"
+
+	// PhaseResumed indicates the namespace has been successfully resumed
+	PhaseResumed Phase = "Resumed"
+
+	// PhaseFailed indicates the operation has failed
+	PhaseFailed Phase = "Failed"
+
+	// AnnotationOriginalReplicas stores the original replica count before freezing
+	AnnotationOriginalReplicas = "apps.ops.dev/original-replicas"
+)
+
 // NamespaceLifecyclePolicySpec defines the desired state of NamespaceLifecyclePolicy
 type NamespaceLifecyclePolicySpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -30,9 +84,41 @@ type NamespaceLifecyclePolicySpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// foo is an example field of NamespaceLifecyclePolicy. Edit namespacelifecyclepolicy_types.go to remove/update
+	// targetNamespace specifies the name of the namespace to which this policy applies.
+	// This field is required and must reference an existing namespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetNamespace string `json:"targetNamespace"`
+
+	// selector is a label selector to filter which Deployments and StatefulSets
+	// in the target namespace should be affected by this policy.
+	// If not specified, all Deployments and StatefulSets in the namespace will be affected.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
+
+	// action defines the lifecycle operation to perform on the target namespace.
+	// Valid values are:
+	// - "Freeze": Prevents new deployments and modifications in the namespace
+	// - "Resume": Allows normal operations in the namespace
+	// This field is required.
+	// +kubebuilder:validation:Required
+	Action LifecycleAction `json:"action"`
+
+	// operationId is an optional identifier for this operation.
+	// Can be used for tracking and correlation purposes.
+	// +optional
+	OperationId string `json:"operationId,omitempty"`
+
+	// startupPolicy defines the behavior when the operator starts.
+	// Valid values are:
+	// - "Ignore": No action taken at startup
+	// - "Resume": Resume the namespace at startup
+	// - "Freeze": Freeze the namespace at startup
+	// This field is required.
+	// +kubebuilder:validation:Required
+	StartupPolicy StartupPolicy `json:"startupPolicy"`
 }
 
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
@@ -42,6 +128,21 @@ type NamespaceLifecyclePolicyStatus struct {
 
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+
+	// phase represents the current phase of the namespace lifecycle operation.
+	// Possible values are: Idle, Freezing, Frozen, Resuming, Active, Failed
+	// +optional
+	Phase Phase `json:"phase,omitempty"`
+
+	// lastHandledOperationId stores the operation ID of the last successfully handled operation.
+	// This helps track which operations have been processed by the controller.
+	// +optional
+	LastHandledOperationId string `json:"lastHandledOperationId,omitempty"`
+
+	// message provides a human-readable message about the current status.
+	// This field typically contains details about the current operation or any errors encountered.
+	// +optional
+	Message string `json:"message,omitempty"`
 
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

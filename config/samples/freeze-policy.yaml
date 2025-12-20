@@ -1,0 +1,12 @@
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: freeze-production
+spec:
+  targetNamespace: test-ns
+  action: Resume
+  operationId: "op-20231215-010"
+  selector:
+    matchLabels:
+      app: test1
+  startupPolicy: Ignore

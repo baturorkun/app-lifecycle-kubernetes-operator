@@ -6,4 +6,18 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: namespacelifecyclepolicy-sample
 spec:
-  # TODO(user): Add fields here
+  targetNamespace: production
+  action: Resume
+  operationId: "op-12345678 "
+  startupPolicy: Ignore
+  # selector is optional - if not specified, all Deployments and StatefulSets will be affected
+  # selector:
+  #   matchLabels:
+  #     app: myapp
+  #     environment: production
+  #   matchExpressions:
+  #   - key: tier
+  #     operator: In
+  #     values:
+  #     - frontend
+  #     - backend

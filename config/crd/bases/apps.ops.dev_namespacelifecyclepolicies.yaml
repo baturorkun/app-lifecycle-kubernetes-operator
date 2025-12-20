@@ -40,10 +40,96 @@ spec:
           spec:
             description: spec defines the desired state of NamespaceLifecyclePolicy
             properties:
-              foo:
-                description: foo is an example field of NamespaceLifecyclePolicy.
-                  Edit namespacelifecyclepolicy_types.go to remove/update
+              action:
+                description: |-
+                  action defines the lifecycle operation to perform on the target namespace.
+                  Valid values are:
+                  - "Freeze": Prevents new deployments and modifications in the namespace
+                  - "Resume": Allows normal operations in the namespace
+                  This field is required.
+                enum:
+                - Freeze
+                - Resume
                 type: string
+              operationId:
+                description: |-
+                  operationId is an optional identifier for this operation.
+                  Can be used for tracking and correlation purposes.
+                type: string
+              selector:
+                description: |-
+                  selector is a label selector to filter which Deployments and StatefulSets
+                  in the target namespace should be affected by this policy.
+                  If not specified, all Deployments and StatefulSets in the namespace will be affected.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              startupPolicy:
+                description: |-
+                  startupPolicy defines the behavior when the operator starts.
+                  Valid values are:
+                  - "Ignore": No action taken at startup
+                  - "Resume": Resume the namespace at startup
+                  - "Freeze": Freeze the namespace at startup
+                  This field is required.
+                enum:
+                - Ignore
+                - Resume
+                - Freeze
+                type: string
+              targetNamespace:
+                description: |-
+                  targetNamespace specifies the name of the namespace to which this policy applies.
+                  This field is required and must reference an existing namespace.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+            required:
+            - action
+            - startupPolicy
+            - targetNamespace
             type: object
           status:
             description: status defines the observed state of NamespaceLifecyclePolicy
@@ -117,6 +203,28 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              lastHandledOperationId:
+                description: |-
+                  lastHandledOperationId stores the operation ID of the last successfully handled operation.
+                  This helps track which operations have been processed by the controller.
+                type: string
+              message:
+                description: |-
+                  message provides a human-readable message about the current status.
+                  This field typically contains details about the current operation or any errors encountered.
+                type: string
+              phase:
+                description: |-
+                  phase represents the current phase of the namespace lifecycle operation.
+                  Possible values are: Idle, Freezing, Frozen, Resuming, Active, Failed
+                enum:
+                - Idle
+                - Freezing
+                - Frozen
+                - Resuming
+                - Resumed
+                - Failed
+                type: string
             type: object
         required:
         - spec
