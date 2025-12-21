@@ -51,6 +51,26 @@ spec:
                 - Freeze
                 - Resume
                 type: string
+              balancePods:
+                description: |-
+                  balancePods enables automatic pod redistribution when new nodes become Ready
+                  after a Resume operation. Works in conjunction with balanceWindowSeconds.
+                  When enabled, the operator watches for node Ready events and triggers rolling
+                  restarts to redistribute pods across all available nodes.
+                  Only applies when action is Resume.
+                type: boolean
+              balanceWindowSeconds:
+                default: 600
+                description: |-
+                  balanceWindowSeconds defines the time window (in seconds) after Resume
+                  during which the operator will automatically trigger rolling restarts
+                  when new nodes become Ready. This ensures balanced pod distribution.
+                  Only used when balancePods is true.
+                  Default: 600 (10 minutes)
+                format: int32
+                maximum: 3600
+                minimum: 0
+                type: integer
               operationId:
                 description: |-
                   operationId is an optional identifier for this operation.
@@ -207,6 +227,13 @@ spec:
                 description: |-
                   lastHandledOperationId stores the operation ID of the last successfully handled operation.
                   This helps track which operations have been processed by the controller.
+                type: string
+              lastResumeAt:
+                description: |-
+                  lastResumeAt stores the timestamp when the last Resume operation completed.
+                  Used to determine if automatic pod balancing should still be active.
+                  Only set when action is Resume and the operation completes successfully.
+                format: date-time
                 type: string
               lastStartupAction:
                 description: |-

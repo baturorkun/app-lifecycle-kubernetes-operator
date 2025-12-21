@@ -38,6 +38,23 @@ selector:
 - **LastHandledOperationId**: Tracks processed operations
 - **LastStartupAt**: When operator last checked startup policy
 - **LastStartupAction**: What action was taken at startup
+- **LastResumeAt**: Timestamp of last resume operation (used for pod balancing)
+
+### ⚖️ Automatic Pod Balancing
+When resuming workloads, pods may end up unevenly distributed if nodes become Ready at different times:
+- **Problem**: Resume happens with 2 nodes ready → all pods go to those 2 nodes → 3rd node comes up later → stays empty
+- **Solution**: Enable `balancePods: true` to automatically rebalance pods when new nodes become Ready
+- **Time Window**: Set `balanceWindowSeconds` to control how long after resume the operator watches for new nodes
+- **Event-Driven**: Operator watches node Ready events and triggers rolling restart when needed
+- **Automatic**: No manual intervention required - pods redistribute across all available nodes
+
+Example:
+```yaml
+spec:
+  action: Resume
+  balancePods: true
+  balanceWindowSeconds: 600  # Watch for new nodes for 10 minutes
+```
 
 ## Quick Start
 
@@ -146,6 +163,30 @@ Use with a CronJob to freeze test environments overnight:
 - Change `operationId` daily to trigger new freeze operation
 - `startupPolicy: Ignore` prevents auto-resume on operator restart
 
+### Example 5: Resume with Automatic Pod Balancing
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: resume-with-balancing
+  namespace: default
+spec:
+  targetNamespace: production
+  action: Resume
+  operationId: "resume-20231216-001"
+  startupPolicy: Resume
+  balancePods: true
+  balanceWindowSeconds: 600  # 10 minutes
+```
+
+This will:
+- Resume all frozen Deployments/StatefulSets in `production` namespace
+- Watch for new nodes becoming Ready for the next 10 minutes
+- Automatically trigger rolling restart when new nodes join
+- Ensure pods are evenly distributed across all available nodes
+- Perfect for scenarios where nodes start at different times (cluster scaling, node maintenance)
+
 ## API Reference
 
 ### NamespaceLifecyclePolicySpec
@@ -157,6 +198,8 @@ Use with a CronJob to freeze test environments overnight:
 | `operationId` | string | No | Unique ID for operation idempotency |
 | `startupPolicy` | enum | Yes | `Ignore`, `Freeze`, or `Resume` - action on operator startup |
 | `selector` | LabelSelector | No | Filter resources by labels (all if omitted) |
+| `balancePods` | boolean | No | Enable automatic pod redistribution when nodes become Ready (default: false) |
+| `balanceWindowSeconds` | int32 | No | Time window in seconds for pod balancing after resume (default: 600, max: 3600) |
 
 ### NamespaceLifecyclePolicyStatus
 
@@ -167,6 +210,7 @@ Use with a CronJob to freeze test environments overnight:
 | `message` | string | Human-readable status message |
 | `lastStartupAt` | timestamp | When startup policy was last checked |
 | `lastStartupAction` | string | Action taken at startup (e.g., `FREEZE_APPLIED`, `NO_ACTION_ALREADY_FROZEN`) |
+| `lastResumeAt` | timestamp | When last Resume operation completed (used for pod balancing time window) |
 | `conditions` | []Condition | Kubernetes standard conditions (reserved for future use) |
 
 ### Startup Policy Actions

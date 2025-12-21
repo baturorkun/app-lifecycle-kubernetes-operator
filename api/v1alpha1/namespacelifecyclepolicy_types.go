@@ -119,6 +119,25 @@ type NamespaceLifecyclePolicySpec struct {
 	// This field is required.
 	// +kubebuilder:validation:Required
 	StartupPolicy StartupPolicy `json:"startupPolicy"`
+
+	// balancePods enables automatic pod redistribution when new nodes become Ready
+	// after a Resume operation. Works in conjunction with balanceWindowSeconds.
+	// When enabled, the operator watches for node Ready events and triggers rolling
+	// restarts to redistribute pods across all available nodes.
+	// Only applies when action is Resume.
+	// +optional
+	BalancePods bool `json:"balancePods,omitempty"`
+
+	// balanceWindowSeconds defines the time window (in seconds) after Resume
+	// during which the operator will automatically trigger rolling restarts
+	// when new nodes become Ready. This ensures balanced pod distribution.
+	// Only used when balancePods is true.
+	// Default: 600 (10 minutes)
+	// +optional
+	// +kubebuilder:default=600
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600
+	BalanceWindowSeconds int32 `json:"balanceWindowSeconds,omitempty"`
 }
 
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
@@ -159,6 +178,12 @@ type NamespaceLifecyclePolicyStatus struct {
 	// - SKIPPED_NAMESPACE_NOT_FOUND - Target namespace doesn't exist
 	// +optional
 	LastStartupAction string `json:"lastStartupAction,omitempty"`
+
+	// lastResumeAt stores the timestamp when the last Resume operation completed.
+	// Used to determine if automatic pod balancing should still be active.
+	// Only set when action is Resume and the operation completes successfully.
+	// +optional
+	LastResumeAt *metav1.Time `json:"lastResumeAt,omitempty"`
 
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

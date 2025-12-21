@@ -20,16 +20,22 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "github.com/baturorkun/app-lifecycle-kubernetes-operator/api/v1alpha1"
 )
@@ -46,6 +52,7 @@ type NamespaceLifecyclePolicyReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 
 // shouldSkipOperation checks if the operation should be skipped based on operationId
 func (r *NamespaceLifecyclePolicyReconciler) shouldSkipOperation(policy *appsv1alpha1.NamespaceLifecyclePolicy) bool {
@@ -375,16 +382,42 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Processing NamespaceLifecyclePolicy",
-		"name", policy.Name,
-		"action", policy.Spec.Action,
-		"targetNamespace", policy.Spec.TargetNamespace,
-		"operationId", policy.Spec.OperationId)
-
 	// Check if this operation was already handled
 	if r.shouldSkipOperation(&policy) {
-		log.Info("Operation already handled, skipping",
-			"operationId", policy.Spec.OperationId)
+		// Only check balancing if this reconcile was triggered by a node event
+		if _, hasNodeEvent := policy.Annotations["apps.ops.dev/node-ready-event"]; hasNodeEvent {
+			if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
+				if shouldBalance := r.shouldPerformBalancing(&policy); shouldBalance {
+					log.Info("✅ Triggering pod balancing",
+						"policy", policy.Name)
+
+					if err := r.performBalancing(ctx, &policy); err != nil {
+						log.Error(err, "Failed to perform balancing")
+					}
+				} else {
+					// Log when window expired
+					elapsed := time.Since(policy.Status.LastResumeAt.Time)
+					balanceWindow := time.Duration(policy.Spec.BalanceWindowSeconds) * time.Second
+					if balanceWindow == 0 {
+						balanceWindow = 10 * time.Minute
+					}
+
+					log.Info("⛔ Node became Ready but Balance window EXPIRED",
+						"policy", policy.Name,
+						"elapsed", fmt.Sprintf("%ds", int(elapsed.Seconds())),
+						"window", fmt.Sprintf("%ds", int(balanceWindow.Seconds())))
+				}
+			}
+
+			// Remove the node-ready annotation after processing
+			delete(policy.Annotations, "apps.ops.dev/node-ready-event")
+			if err := r.Update(ctx, &policy); err != nil {
+				log.Error(err, "Failed to remove node-ready annotation")
+				return ctrl.Result{}, err
+			}
+		}
+		// If no node event annotation, silently skip balancing check
+
 		return ctrl.Result{}, nil
 	}
 
@@ -555,9 +588,16 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		// Update status to resumed
-		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseResumed,
-			fmt.Sprintf("Successfully resumed %d deployments and %d statefulsets",
-				len(deployments.Items), len(statefulSets.Items))); err != nil {
+		policy.Status.Phase = appsv1alpha1.PhaseResumed
+		policy.Status.Message = fmt.Sprintf("Successfully resumed %d deployments and %d statefulsets",
+			len(deployments.Items), len(statefulSets.Items))
+		policy.Status.LastHandledOperationId = policy.Spec.OperationId
+
+		// Set LastResumeAt timestamp for pod balancing
+		now := metav1.Now()
+		policy.Status.LastResumeAt = &now
+
+		if err := r.Status().Update(ctx, &policy); err != nil {
 			log.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}
@@ -567,11 +607,218 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	return ctrl.Result{}, nil
 }
 
+// isNodeReady checks if a node is in Ready condition
+func isNodeReady(node *corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// mapNodeReadyToPolicy maps Node Ready/NotReady events to NamespaceLifecyclePolicy resources
+func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
+	log := logf.FromContext(ctx)
+
+	node, ok := obj.(*corev1.Node)
+	if !ok {
+		log.Error(fmt.Errorf("expected Node object"), "Invalid object type")
+		return nil
+	}
+
+	nodeReady := isNodeReady(node)
+
+	// Get the Ready condition to check recent transition
+	var readyCondition *corev1.NodeCondition
+	for i := range node.Status.Conditions {
+		if node.Status.Conditions[i].Type == corev1.NodeReady {
+			readyCondition = &node.Status.Conditions[i]
+			break
+		}
+	}
+
+	// Check if this is a recent transition (within last 10 seconds)
+	isRecentTransition := false
+	if readyCondition != nil {
+		transitionAge := time.Since(readyCondition.LastTransitionTime.Time)
+		isRecentTransition = transitionAge < 10*time.Second
+	}
+
+	// If node became NotReady, log and return - no reconciliation needed
+	if !nodeReady {
+		log.Info("⚠️  Node NotReady",
+			"node", node.Name,
+			"action", "Will trigger pod balancing when node becomes Ready")
+		return nil
+	}
+
+	// Node is Ready - check if this is a recent transition
+	if !isRecentTransition {
+		// Skip if not a recent transition (likely resync/restart)
+		return nil
+	}
+
+	// Log the Ready transition
+	log.Info("🟢 Node Ready",
+		"node", node.Name,
+		"action", "Checking policies for pod balancing")
+
+	// List all NamespaceLifecyclePolicy resources with balancePods=true
+	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
+	if err := r.List(ctx, policyList); err != nil {
+		log.Error(err, "Failed to list NamespaceLifecyclePolicy resources for node event")
+		return nil
+	}
+
+	var requests []reconcile.Request
+	var candidatePolicies []string
+
+	for i := range policyList.Items {
+		policy := &policyList.Items[i]
+		if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
+			// Add annotation to mark this reconcile was triggered by node event
+			if policy.Annotations == nil {
+				policy.Annotations = make(map[string]string)
+			}
+			policy.Annotations["apps.ops.dev/node-ready-event"] = time.Now().Format(time.RFC3339)
+
+			if err := r.Update(ctx, policy); err != nil {
+				log.Error(err, "Failed to add node-ready annotation", "policy", policy.Name)
+				continue
+			}
+
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      policy.Name,
+					Namespace: policy.Namespace,
+				},
+			})
+			candidatePolicies = append(candidatePolicies, policy.Name)
+		}
+	}
+
+	// Log only when actually enqueuing policies
+	if len(requests) > 0 {
+		log.V(1).Info("Enqueuing policies for balancing",
+			"node", node.Name,
+			"policies", candidatePolicies)
+	}
+
+	return requests
+}
+
+// shouldPerformBalancing checks if balancing should be performed based on time window
+func (r *NamespaceLifecyclePolicyReconciler) shouldPerformBalancing(policy *appsv1alpha1.NamespaceLifecyclePolicy) bool {
+	if policy.Status.LastResumeAt == nil {
+		return false
+	}
+
+	balanceWindow := time.Duration(policy.Spec.BalanceWindowSeconds) * time.Second
+	if balanceWindow == 0 {
+		balanceWindow = 10 * time.Minute // Default 10 minutes
+	}
+
+	elapsed := time.Since(policy.Status.LastResumeAt.Time)
+	return elapsed < balanceWindow
+}
+
+// performBalancing triggers rolling restart on all deployments/statefulsets in target namespace
+func (r *NamespaceLifecyclePolicyReconciler) performBalancing(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
+	log := logf.FromContext(ctx)
+
+	// List deployments
+	deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+	if err != nil {
+		return err
+	}
+
+	// Trigger rolling restart for each deployment
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if err := r.triggerRollingRestart(ctx, deployment); err != nil {
+			log.Error(err, "Failed to trigger rolling restart for deployment", "deployment", deployment.Name)
+		}
+	}
+
+	// List statefulsets
+	statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+	if err != nil {
+		return err
+	}
+
+	// Trigger rolling restart for each statefulset
+	for i := range statefulSets.Items {
+		sts := &statefulSets.Items[i]
+		if err := r.triggerRollingRestartSts(ctx, sts); err != nil {
+			log.Error(err, "Failed to trigger rolling restart for statefulset", "statefulset", sts.Name)
+		}
+	}
+
+	return nil
+}
+
+// triggerRollingRestart updates deployment pod template annotation to trigger rolling update
+func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestart(ctx context.Context, deployment *appsv1.Deployment) error {
+	log := logf.FromContext(ctx)
+
+	if deployment.Spec.Template.Annotations == nil {
+		deployment.Spec.Template.Annotations = make(map[string]string)
+	}
+
+	deployment.Spec.Template.Annotations["apps.ops.dev/restart-timestamp"] = time.Now().Format(time.RFC3339)
+
+	log.Info("Triggering rolling restart for balanced pod distribution",
+		"deployment", deployment.Name,
+		"namespace", deployment.Namespace)
+
+	return r.Update(ctx, deployment)
+}
+
+// triggerRollingRestartSts updates statefulset pod template annotation to trigger rolling update
+func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestartSts(ctx context.Context, sts *appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+
+	if sts.Spec.Template.Annotations == nil {
+		sts.Spec.Template.Annotations = make(map[string]string)
+	}
+
+	sts.Spec.Template.Annotations["apps.ops.dev/restart-timestamp"] = time.Now().Format(time.RFC3339)
+
+	log.Info("Triggering rolling restart for balanced pod distribution",
+		"statefulset", sts.Name,
+		"namespace", sts.Namespace)
+
+	return r.Update(ctx, sts)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.NamespaceLifecyclePolicy{}).
-		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		For(&appsv1alpha1.NamespaceLifecyclePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&corev1.Node{},
+			handler.EnqueueRequestsFromMapFunc(r.mapNodeReadyToPolicy),
+			builder.WithPredicates(predicate.Funcs{
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldNode := e.ObjectOld.(*corev1.Node)
+					newNode := e.ObjectNew.(*corev1.Node)
+
+					oldReady := isNodeReady(oldNode)
+					newReady := isNodeReady(newNode)
+
+					// Only trigger when Ready status actually changes
+					return oldReady != newReady
+				},
+				CreateFunc: func(e event.CreateEvent) bool {
+					// Don't trigger on operator startup for existing nodes
+					// Only trigger when operator is running and a node transitions NotReady -> Ready
+					return false
+				},
+				DeleteFunc:  func(e event.DeleteEvent) bool { return false },
+				GenericFunc: func(e event.GenericEvent) bool { return false },
+			}),
+		).
 		Named("namespacelifecyclepolicy").
 		Complete(r)
 }

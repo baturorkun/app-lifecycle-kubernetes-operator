@@ -111,6 +111,10 @@ func (in *NamespaceLifecyclePolicyStatus) DeepCopyInto(out *NamespaceLifecyclePo
 		in, out := &in.LastStartupAt, &out.LastStartupAt
 		*out = (*in).DeepCopy()
 	}
+	if in.LastResumeAt != nil {
+		in, out := &in.LastResumeAt, &out.LastResumeAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

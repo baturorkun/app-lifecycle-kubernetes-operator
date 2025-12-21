@@ -4,8 +4,8 @@ metadata:
   name: nlp
 spec:
   targetNamespace: test-ns
-  action: Freeze
-  operationId: "op-20231215-013"
+  action: Resume
+  operationId: "op-20231215-016"
   selector:
     matchLabels:
       app: test
