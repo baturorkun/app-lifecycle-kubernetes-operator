@@ -158,10 +158,15 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 
 // resumeDeployment restores the deployment replicas from the annotation
 func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Context, deployment *appsv1.Deployment) error {
+	log := logf.FromContext(ctx)
+
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := deployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
 	if !exists {
-		// No annotation found, nothing to resume
+		log.Info("Skipping resume: deployment was not frozen",
+			"deployment", deployment.Name,
+			"namespace", deployment.Namespace,
+			"reason", "Missing freeze annotation")
 		return nil
 	}
 
@@ -182,10 +187,15 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 
 // resumeStatefulSet restores the statefulset replicas from the annotation
 func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet) error {
+	log := logf.FromContext(ctx)
+
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := sts.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
 	if !exists {
-		// No annotation found, nothing to resume
+		log.Info("Skipping resume: statefulset was not frozen",
+			"statefulset", sts.Name,
+			"namespace", sts.Namespace,
+			"reason", "Missing freeze annotation")
 		return nil
 	}
 
