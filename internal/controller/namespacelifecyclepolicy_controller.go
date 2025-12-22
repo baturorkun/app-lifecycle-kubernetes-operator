@@ -254,7 +254,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	// Skip if startup policy is Ignore
 	if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyIgnore {
 		policy.Status.LastStartupAction = "SKIPPED_IGNORE"
-		r.Status().Update(ctx, policy)
+		if err := r.Status().Update(ctx, policy); err != nil {
+			log.Error(err, "Failed to update status")
+		}
 		log.Info("Startup policy check: no action needed",
 			"policy", policy.Name,
 			"startupPolicy", "Ignore",
@@ -265,15 +267,18 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	// Determine desired phase based on startup policy
 	var desiredPhase appsv1alpha1.Phase
 	var action appsv1alpha1.LifecycleAction
-	if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyFreeze {
+	switch policy.Spec.StartupPolicy {
+	case appsv1alpha1.StartupPolicyFreeze:
 		desiredPhase = appsv1alpha1.PhaseFrozen
 		action = appsv1alpha1.LifecycleActionFreeze
-	} else if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyResume {
+	case appsv1alpha1.StartupPolicyResume:
 		desiredPhase = appsv1alpha1.PhaseResumed
 		action = appsv1alpha1.LifecycleActionResume
-	} else {
+	default:
 		policy.Status.LastStartupAction = "SKIPPED_UNKNOWN_POLICY"
-		r.Status().Update(ctx, policy)
+		if err := r.Status().Update(ctx, policy); err != nil {
+			log.Error(err, "Failed to update status")
+		}
 		log.Info("Startup policy check: no action needed",
 			"policy", policy.Name,
 			"startupPolicy", policy.Spec.StartupPolicy,
@@ -288,7 +293,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		} else {
 			policy.Status.LastStartupAction = "NO_ACTION_ALREADY_RESUMED"
 		}
-		r.Status().Update(ctx, policy)
+		if err := r.Status().Update(ctx, policy); err != nil {
+			log.Error(err, "Failed to update status")
+		}
 		log.Info("Startup policy check: no action needed",
 			"policy", policy.Name,
 			"startupPolicy", policy.Spec.StartupPolicy,
@@ -336,7 +343,8 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		"statefulsets", len(statefulSets.Items))
 
 	// Apply action
-	if action == appsv1alpha1.LifecycleActionFreeze {
+	switch action {
+	case appsv1alpha1.LifecycleActionFreeze:
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
 			if err := r.freezeDeployment(ctx, deployment); err != nil {
@@ -351,7 +359,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 		policy.Status.LastStartupAction = "FREEZE_APPLIED"
 		log.Info("Startup policy applied: frozen", "policy", policy.Name)
-	} else if action == appsv1alpha1.LifecycleActionResume {
+	case appsv1alpha1.LifecycleActionResume:
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
 			if err := r.resumeDeployment(ctx, deployment); err != nil {
@@ -579,7 +587,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	}
 
 	// Apply action
-	if policy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
+	switch policy.Spec.Action {
+	case appsv1alpha1.LifecycleActionFreeze:
 		// Freeze all deployments
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
@@ -616,7 +625,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			return ctrl.Result{}, err
 		}
 
-	} else if policy.Spec.Action == appsv1alpha1.LifecycleActionResume {
+	case appsv1alpha1.LifecycleActionResume:
 		// Resume all deployments
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
