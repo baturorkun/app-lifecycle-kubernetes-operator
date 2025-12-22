@@ -51,7 +51,11 @@ var _ = Describe("NamespaceLifecyclePolicy Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: appsv1alpha1.NamespaceLifecyclePolicySpec{
+						TargetNamespace: "default",
+						Action:          appsv1alpha1.LifecycleActionFreeze,
+						StartupPolicy:   appsv1alpha1.StartupPolicyIgnore,
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
