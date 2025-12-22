@@ -1,11 +1,38 @@
+# Start Kubernetes by Kind
+bash kubernetes/kind/start-3nodes.sh
+
+
+# Create Deployment
+
 kubectl create namespace test-ns
 kubectl create deployment nginx --image=nginx --replicas=4 -n test-ns
 kubectl label deployment nginx app=test -n test-ns --overwrite
 
 
-# Start Kubernetes by Kind
-bash kubernetes/kind/start-3nodes.sh
-
+# Create StatefulSet
+cat <<EOF | kubectl apply -n test-ns -f -
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web
+  labels:
+    test: test
+spec:
+  selector:
+    matchLabels:
+      app: web
+  serviceName: "nginx"
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: web
+        test: test
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+EOF
 
 
 # Drain node

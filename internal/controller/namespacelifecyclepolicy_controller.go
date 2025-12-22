@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -223,11 +224,22 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 
 // updateStatus updates the policy status with phase, message and lastHandledOperationId
 func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string) error {
-	policy.Status.Phase = phase
-	policy.Status.Message = message
-	policy.Status.LastHandledOperationId = policy.Spec.OperationId
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version to avoid optimistic locking errors (the object has been modified)
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+			return err
+		}
 
-	return r.Status().Update(ctx, policy)
+		latestPolicy.Status.Phase = phase
+		latestPolicy.Status.Message = message
+
+		// Map the Spec from the original policy object to the latest (in case OpId match is needed)
+		// But sticking to the OpId from the original request context
+		latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
+
+		return r.Status().Update(ctx, latestPolicy)
+	})
 }
 
 // ApplyStartupPolicy applies the startup policy action to the namespace
@@ -298,10 +310,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		if errors.IsNotFound(err) {
 			policy.Status.LastStartupAction = "SKIPPED_NAMESPACE_NOT_FOUND"
 			r.Status().Update(ctx, policy)
-			log.Info("Startup policy check: no action needed",
+			log.Info("FAILED: Target namespace not found",
 				"policy", policy.Name,
-				"targetNamespace", policy.Spec.TargetNamespace,
-				"reason", "Target namespace not found")
+				"targetNamespace", policy.Spec.TargetNamespace)
 			return nil // Don't fail, just skip
 		}
 		return err
@@ -369,7 +380,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logf.FromContext(ctx)
+	log := ctrl.Log
 
 	// Fetch the NamespaceLifecyclePolicy CR
 	var policy appsv1alpha1.NamespaceLifecyclePolicy
@@ -380,6 +391,57 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 		log.Error(err, "Failed to get NamespaceLifecyclePolicy")
 		return ctrl.Result{}, err
+	}
+
+	// Check for duplicate policies targeting the same namespace
+	// We want to ensure only one policy manages a namespace at a time.
+	// Resolution strategy: Older policy wins.
+	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
+	if err := r.List(ctx, policyList); err != nil {
+		log.Error(err, "Failed to list NamespaceLifecyclePolicies")
+		return ctrl.Result{}, err
+	}
+
+	for _, p := range policyList.Items {
+		// Skip self
+		if p.UID == policy.UID {
+			continue
+		}
+
+		// Check if target namespace matches
+		if p.Spec.TargetNamespace == policy.Spec.TargetNamespace {
+			// If duplicate is being deleted, ignore it
+			if !p.DeletionTimestamp.IsZero() {
+				continue
+			}
+
+			// If duplicate is already Failed, ignore it (treat as non-existent for conflict resolution)
+			// This allows a new valid policy to take over if the old one was failed.
+			if p.Status.Phase == appsv1alpha1.PhaseFailed {
+				continue
+			}
+
+			// If current policy is newer than the existing one, or equal time but alphabetically later, fail current.
+			// This ensures determinstic behavior where one policy stays active and others fail.
+			if policy.CreationTimestamp.After(p.CreationTimestamp.Time) ||
+				(policy.CreationTimestamp.Equal(&p.CreationTimestamp) && policy.Name > p.Name) {
+
+				msg := fmt.Sprintf("Conflict: Namespace '%s' is already managed by policy '%s'",
+					policy.Spec.TargetNamespace, p.Name)
+				log.Info("FAILED: Policy conflict detected",
+					"policy", policy.Name,
+					"targetNamespace", policy.Spec.TargetNamespace,
+					"conflictsWith", p.Name,
+					"reason", "Namespace already managed by another policy")
+
+				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, msg); err != nil {
+					log.Error(err, "Failed to update status for duplicate policy")
+					return ctrl.Result{}, err
+				}
+				// Stop reconciliation
+				return ctrl.Result{}, nil
+			}
+		}
 	}
 
 	// Check if this operation was already handled
@@ -429,10 +491,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			log.Info(errMsg)
 
 			// Update status without setting lastHandledOperationId (allow retry when namespace is created)
-			policy.Status.Phase = appsv1alpha1.PhaseFailed
-			policy.Status.Message = errMsg
 			// DO NOT set LastHandledOperationId - we want to retry when namespace is created
-			if err := r.Status().Update(ctx, &policy); err != nil {
+			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg); err != nil {
 				log.Error(err, "Failed to update status")
 				return ctrl.Result{}, err
 			}
@@ -444,9 +504,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Other error (permissions, api server down, etc) - this should be retried
 		log.Error(err, "Failed to get target namespace")
 
-		policy.Status.Phase = appsv1alpha1.PhaseFailed
-		policy.Status.Message = fmt.Sprintf("Failed to get namespace: %v", err)
-		if statusErr := r.Status().Update(ctx, &policy); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, fmt.Sprintf("Failed to get namespace: %v", err)); statusErr != nil {
 			log.Error(statusErr, "Failed to update status")
 		}
 
@@ -587,17 +645,27 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			}
 		}
 
-		// Update status to resumed
-		policy.Status.Phase = appsv1alpha1.PhaseResumed
-		policy.Status.Message = fmt.Sprintf("Successfully resumed %d deployments and %d statefulsets",
-			len(deployments.Items), len(statefulSets.Items))
-		policy.Status.LastHandledOperationId = policy.Spec.OperationId
-
 		// Set LastResumeAt timestamp for pod balancing
 		now := metav1.Now()
-		policy.Status.LastResumeAt = &now
+		// We need to update this field as well, but our updateStatus helper only updates Phase, Message and OperationId.
+		// Since we need to update a custom field (LastResumeAt) securely, we should use a custom retry block here.
 
-		if err := r.Status().Update(ctx, &policy); err != nil {
+		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+
+			latestPolicy.Status.Phase = appsv1alpha1.PhaseResumed
+			latestPolicy.Status.Message = fmt.Sprintf("Successfully resumed %d deployments and %d statefulsets",
+				len(deployments.Items), len(statefulSets.Items))
+			latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
+			latestPolicy.Status.LastResumeAt = &now
+
+			return r.Status().Update(ctx, latestPolicy)
+		})
+
+		if err != nil {
 			log.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}

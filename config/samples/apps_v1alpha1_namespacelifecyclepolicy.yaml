@@ -8,8 +8,8 @@ metadata:
 spec:
   targetNamespace: production
   action: Resume
-  operationId: "op-12345678"
-  startupPolicy: Ignore
+  operationId: "op-123456789-2"
+  startupPolicy: Resume
 
   # balancePods enables automatic pod redistribution when nodes become Ready after resume
   # Set to true to enable balanced pod distribution across nodes

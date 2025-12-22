@@ -1,14 +1,14 @@
 apiVersion: apps.ops.dev/v1alpha1
 kind: NamespaceLifecyclePolicy
 metadata:
-  name: nlp
+  name: nlp1
 spec:
   targetNamespace: test-ns
   action: Freeze
   operationId: "op-20231215-013"
   selector:
     matchLabels:
-      app: test
+      app: test1
   startupPolicy: Resume
   balancePods: true
   balanceWindowSeconds: 600
