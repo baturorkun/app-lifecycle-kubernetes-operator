@@ -316,7 +316,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	if err := r.Get(ctx, client.ObjectKey{Name: policy.Spec.TargetNamespace}, namespace); err != nil {
 		if errors.IsNotFound(err) {
 			policy.Status.LastStartupAction = "SKIPPED_NAMESPACE_NOT_FOUND"
-			r.Status().Update(ctx, policy)
+			if err := r.Status().Update(ctx, policy); err != nil {
+				log.Error(err, "Failed to update status")
+			}
 			log.Info("FAILED: Target namespace not found",
 				"policy", policy.Name,
 				"targetNamespace", policy.Spec.TargetNamespace)
