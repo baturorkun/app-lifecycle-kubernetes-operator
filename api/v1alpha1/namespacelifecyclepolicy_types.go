@@ -75,6 +75,9 @@ const (
 
 	// AnnotationOriginalReplicas stores the original replica count before freezing
 	AnnotationOriginalReplicas = "apps.ops.dev/original-replicas"
+
+	// AnnotationOriginalTerminationGracePeriod stores the original terminationGracePeriodSeconds before freezing
+	AnnotationOriginalTerminationGracePeriod = "apps.ops.dev/original-termination-grace-period"
 )
 
 // NamespaceLifecyclePolicySpec defines the desired state of NamespaceLifecyclePolicy
@@ -138,6 +141,25 @@ type NamespaceLifecyclePolicySpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
 	BalanceWindowSeconds int32 `json:"balanceWindowSeconds,omitempty"`
+
+	// terminationGracePeriodSeconds defines graceful shutdown settings for different resource types.
+	// +optional
+	TerminationGracePeriodSeconds *TerminationGracePeriodConfig `json:"terminationGracePeriodSeconds,omitempty"`
+}
+
+// TerminationGracePeriodConfig defines terminationGracePeriodSeconds for different resource types.
+type TerminationGracePeriodConfig struct {
+	// deployment specifies the terminationGracePeriodSeconds for Deployments.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=300
+	Deployment *int64 `json:"deployment,omitempty"`
+
+	// statefulSet specifies the terminationGracePeriodSeconds for StatefulSets.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=300
+	StatefulSet *int64 `json:"statefulSet,omitempty"`
 }
 
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.

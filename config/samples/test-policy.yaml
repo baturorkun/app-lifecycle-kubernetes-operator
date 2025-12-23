@@ -4,11 +4,14 @@ metadata:
   name: nlp
 spec:
   targetNamespace: test-ns
-  action: Resume
-  operationId: "op-20231215-016"
+  action: Freeze
+  operationId: "op-20231215-020"
   selector:
     matchLabels:
       app: test
-  startupPolicy: Resume
+  startupPolicy: Freeze
   balancePods: true
-  balanceWindowSeconds: 600
+  balanceWindowSeconds: 500
+  terminationGracePeriodSeconds:
+    deployment: 15
+    statefulSet: 30

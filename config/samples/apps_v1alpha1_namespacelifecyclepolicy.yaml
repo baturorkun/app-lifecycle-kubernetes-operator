@@ -6,19 +6,41 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: namespacelifecyclepolicy-sample
 spec:
+  # --- MANDATORY FIELDS ---
+
+  # targetNamespace specifies the name of the namespace to which this policy applies.
+  # This field is required and must reference an existing namespace.
   targetNamespace: production
+
+  # action defines the lifecycle operation to perform.
+  # Valid values: "Freeze", "Resume"
   action: Resume
-  operationId: "op-123456789-2"
+
+  # startupPolicy defines the behavior when the operator starts.
+  # Valid values: "Ignore", "Resume", "Freeze"
   startupPolicy: Resume
 
-  # balancePods enables automatic pod redistribution when nodes become Ready after resume
-  # Set to true to enable balanced pod distribution across nodes
-  balancePods: true
+  # --- OPTIONAL FIELDS ---
+
+  # operationId is an optional identifier for this operation.
+  # Can be used for tracking and correlation purposes.
+  # operationId: "op-123456789-2"
+
+  # balancePods enables automatic pod redistribution when new nodes become Ready
+  # after a Resume operation. Only applies when action is Resume.
+  # balancePods: true
 
   # balanceWindowSeconds defines how long (in seconds) after resume the operator
-  # will automatically trigger rolling restarts when new nodes become Ready
+  # will automatically trigger rolling restarts. Only used if balancePods is true.
   # Default: 600 (10 minutes). Range: 0-3600
-  balanceWindowSeconds: 600
+  # balanceWindowSeconds: 600
+
+  # terminationGracePeriodSeconds defines graceful shutdown overrides for different resource types
+  # during the Freeze operation. Original values are restored during Resume.
+  # Range: 0-300 seconds.
+  # terminationGracePeriodSeconds:
+  #   deployment: 10
+  #   statefulSet: 60
 
   # selector is optional - if not specified, all Deployments and StatefulSets will be affected
   # selector:

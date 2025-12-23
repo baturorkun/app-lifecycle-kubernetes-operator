@@ -1,0 +1,8 @@
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: bad-policy
+spec:
+  # targetNamespace: test-ns # MISSING MANDATORY FIELD
+  action: Freeze
+  startupPolicy: Ignore

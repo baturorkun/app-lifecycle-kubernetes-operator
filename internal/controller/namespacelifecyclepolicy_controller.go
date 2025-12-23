@@ -113,7 +113,7 @@ func (r *NamespaceLifecyclePolicyReconciler) listStatefulSets(ctx context.Contex
 }
 
 // freezeDeployment sets the deployment replicas to 0 and stores the original count in an annotation
-func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Context, deployment *appsv1.Deployment) error {
+func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Context, deployment *appsv1.Deployment, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
 	// If already frozen (replicas = 0), skip
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
 		return nil
@@ -131,6 +131,16 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 
 	deployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
 
+	// Handle terminationGracePeriodSeconds override
+	if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.Deployment != nil {
+		if deployment.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
+		} else {
+			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = "nil"
+		}
+		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.Deployment
+	}
+
 	// Set replicas to 0
 	zero := int32(0)
 	deployment.Spec.Replicas = &zero
@@ -139,7 +149,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 }
 
 // freezeStatefulSet sets the statefulset replicas to 0 and stores the original count in an annotation
-func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet) error {
+func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
 	// If already frozen (replicas = 0), skip
 	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
 		return nil
@@ -157,6 +167,16 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 
 	sts.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
 
+	// Handle terminationGracePeriodSeconds override
+	if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.StatefulSet != nil {
+		if sts.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*sts.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
+		} else {
+			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = "nil"
+		}
+		sts.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.StatefulSet
+	}
+
 	// Set replicas to 0
 	zero := int32(0)
 	sts.Spec.Replicas = &zero
@@ -166,7 +186,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 
 // resumeDeployment restores the deployment replicas from the annotation
 func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Context, deployment *appsv1.Deployment) error {
-	log := logf.FromContext(ctx)
+	log := ctrl.Log
 
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := deployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
@@ -187,6 +207,19 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 	replicas := int32(originalReplicas)
 	deployment.Spec.Replicas = &replicas
 
+	// Restore original terminationGracePeriodSeconds if exists
+	if originalGraceStr, ok := deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
+		if originalGraceStr == "nil" {
+			deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+		} else {
+			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
+			if err == nil {
+				deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
+			}
+		}
+		delete(deployment.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
+	}
+
 	// Remove the annotation
 	delete(deployment.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
 
@@ -195,7 +228,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 
 // resumeStatefulSet restores the statefulset replicas from the annotation
 func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet) error {
-	log := logf.FromContext(ctx)
+	log := ctrl.Log
 
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := sts.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
@@ -215,6 +248,19 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 	// Restore original replica count
 	replicas := int32(originalReplicas)
 	sts.Spec.Replicas = &replicas
+
+	// Restore original terminationGracePeriodSeconds if exists
+	if originalGraceStr, ok := sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
+		if originalGraceStr == "nil" {
+			sts.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+		} else {
+			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
+			if err == nil {
+				sts.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
+			}
+		}
+		delete(sts.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
+	}
 
 	// Remove the annotation
 	delete(sts.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
@@ -349,13 +395,13 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	case appsv1alpha1.LifecycleActionFreeze:
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
-			if err := r.freezeDeployment(ctx, deployment); err != nil {
+			if err := r.freezeDeployment(ctx, deployment, policy); err != nil {
 				log.Error(err, "Failed to freeze deployment during startup", "name", deployment.Name)
 			}
 		}
 		for i := range statefulSets.Items {
 			sts := &statefulSets.Items[i]
-			if err := r.freezeStatefulSet(ctx, sts); err != nil {
+			if err := r.freezeStatefulSet(ctx, sts, policy); err != nil {
 				log.Error(err, "Failed to freeze statefulset during startup", "name", sts.Name)
 			}
 		}
@@ -458,6 +504,10 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if r.shouldSkipOperation(&policy) {
 		// Only check balancing if this reconcile was triggered by a node event
 		if _, hasNodeEvent := policy.Annotations["apps.ops.dev/node-ready-event"]; hasNodeEvent {
+			log.Info("Operation handled, checking for pod balancing due to node event",
+				"operationId", policy.Spec.OperationId,
+				"policy", policy.Name)
+
 			if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
 				if shouldBalance := r.shouldPerformBalancing(&policy); shouldBalance {
 					log.Info("✅ Triggering pod balancing",
@@ -487,8 +537,10 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				log.Error(err, "Failed to remove node-ready annotation")
 				return ctrl.Result{}, err
 			}
+		} else {
+			// No node event and operation already handled - safe to skip
+			log.Info("Skipping operation: already handled", "operationId", policy.Spec.OperationId)
 		}
-		// If no node event annotation, silently skip balancing check
 
 		return ctrl.Result{}, nil
 	}
@@ -595,7 +647,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
 			log.Info("Freezing deployment", "name", deployment.Name)
-			if err := r.freezeDeployment(ctx, deployment); err != nil {
+			if err := r.freezeDeployment(ctx, deployment, &policy); err != nil {
 				log.Error(err, "Failed to freeze deployment", "name", deployment.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
 					fmt.Sprintf("Failed to freeze deployment %s: %v", deployment.Name, err)); err != nil {
@@ -609,7 +661,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		for i := range statefulSets.Items {
 			sts := &statefulSets.Items[i]
 			log.Info("Freezing statefulset", "name", sts.Name)
-			if err := r.freezeStatefulSet(ctx, sts); err != nil {
+			if err := r.freezeStatefulSet(ctx, sts, &policy); err != nil {
 				log.Error(err, "Failed to freeze statefulset", "name", sts.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
 					fmt.Sprintf("Failed to freeze statefulset %s: %v", sts.Name, err)); err != nil {
