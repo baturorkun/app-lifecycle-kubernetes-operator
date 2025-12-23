@@ -1,5 +1,6 @@
-# Start Kubernetes by Kind
-bash kubernetes/kind/start-3nodes.sh
+#!/usr/bin/env bash
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 
 # Create Deployment
@@ -33,10 +34,3 @@ spec:
         image: nginx
 
 EOF
-
-
-# Drain node
-kubectl drain dev-worker2 --ignore-daemonsets --delete-emptydir-data
-
-# Uncordon node
-kubectl uncordon dev-worker2

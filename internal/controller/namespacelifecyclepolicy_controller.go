@@ -776,22 +776,22 @@ func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Co
 		isRecentTransition = transitionAge < 10*time.Second
 	}
 
-	// If node became NotReady, log and return - no reconciliation needed
-	if !nodeReady {
-		log.Info("⚠️  Node NotReady",
-			"node", node.Name,
-			"action", "Will trigger pod balancing when node becomes Ready")
-		return nil
-	}
-
-	// Node is Ready - check if this is a recent transition
+	// Skip if not a recent transition (applies to both NotReady and Ready)
+	// This prevents logging stale events from resyncs or old transitions
 	if !isRecentTransition {
-		// Skip if not a recent transition (likely resync/restart)
 		return nil
 	}
 
-	// Log the Ready transition
-	log.Info("🟢 Node Ready",
+	// Handle recent NotReady transition
+	if !nodeReady {
+		log.Info("⚠️  Node transitioned to NotReady",
+			"node", node.Name,
+			"action", "Pod balancing may be triggered when node becomes Ready")
+		return nil
+	}
+
+	// Handle recent Ready transition
+	log.Info("🟢 Node transitioned to Ready",
 		"node", node.Name,
 		"action", "Checking policies for pod balancing")
 
