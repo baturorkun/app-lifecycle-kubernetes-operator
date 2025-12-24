@@ -4,8 +4,8 @@ metadata:
   name: nlp
 spec:
   targetNamespace: test-ns
-  action: Resume
-  operationId: "op-007"
+  action: Freeze
+  operationId: "op-019"
   selector:
     matchLabels:
       app: test
@@ -15,3 +15,10 @@ spec:
   terminationGracePeriodSeconds:
     deployment: 15
     statefulSet: 30
+  startupNodeReadinessPolicy:
+    enabled: true
+    timeoutSeconds: 120         # Wait max 2 minutes for nodes
+    requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
+    #minReadyNodes: 2             # Only used when requireAllNodes: false
+    nodeSelector:
+      node-role.kubernetes.io/worker: ""

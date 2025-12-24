@@ -145,6 +145,11 @@ type NamespaceLifecyclePolicySpec struct {
 	// terminationGracePeriodSeconds defines graceful shutdown settings for different resource types.
 	// +optional
 	TerminationGracePeriodSeconds *TerminationGracePeriodConfig `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// startupNodeReadinessPolicy defines node readiness requirements before
+	// applying startup policy. Only applies when startupPolicy is Resume or Freeze.
+	// +optional
+	StartupNodeReadinessPolicy *StartupNodeReadinessPolicy `json:"startupNodeReadinessPolicy,omitempty"`
 }
 
 // TerminationGracePeriodConfig defines terminationGracePeriodSeconds for different resource types.
@@ -160,6 +165,42 @@ type TerminationGracePeriodConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=300
 	StatefulSet *int64 `json:"statefulSet,omitempty"`
+}
+
+// StartupNodeReadinessPolicy defines node readiness requirements for startup actions
+type StartupNodeReadinessPolicy struct {
+	// enabled activates node readiness checking before applying startup policy
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// timeoutSeconds is the maximum time to wait for nodes to become ready
+	// After timeout, startup action proceeds with available nodes
+	// Default: 60
+	// +optional
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=600
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// minReadyNodes is the minimum number of ready worker nodes required
+	// before applying startup action
+	// Only used when requireAllNodes is false
+	// Default: 1
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	MinReadyNodes int32 `json:"minReadyNodes,omitempty"`
+
+	// requireAllNodes when true, waits for ALL worker nodes matching nodeSelector to be ready
+	// When false, uses minReadyNodes instead
+	// This field is required - you must explicitly choose the behavior
+	// +kubebuilder:validation:Required
+	RequireAllNodes bool `json:"requireAllNodes"`
+
+	// nodeSelector selects which nodes to count as workers
+	// Default: {"node-role.kubernetes.io/worker": ""}
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 }
 
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
@@ -206,6 +247,14 @@ type NamespaceLifecyclePolicyStatus struct {
 	// Only set when action is Resume and the operation completes successfully.
 	// +optional
 	LastResumeAt *metav1.Time `json:"lastResumeAt,omitempty"`
+
+	// startupNodesWaited records how many seconds we waited for nodes during startup
+	// +optional
+	StartupNodesWaited *int32 `json:"startupNodesWaited,omitempty"`
+
+	// startupReadyNodes records how many nodes were ready when startup action was applied
+	// +optional
+	StartupReadyNodes *int32 `json:"startupReadyNodes,omitempty"`
 
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.

@@ -125,6 +125,51 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              startupNodeReadinessPolicy:
+                description: |-
+                  startupNodeReadinessPolicy defines node readiness requirements before
+                  applying startup policy. Only applies when startupPolicy is Resume or Freeze.
+                properties:
+                  enabled:
+                    description: enabled activates node readiness checking before
+                      applying startup policy
+                    type: boolean
+                  minReadyNodes:
+                    default: 1
+                    description: |-
+                      minReadyNodes is the minimum number of ready worker nodes required
+                      before applying startup action
+                      Only used when requireAllNodes is false
+                      Default: 1
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      nodeSelector selects which nodes to count as workers
+                      Default: {"node-role.kubernetes.io/worker": ""}
+                    type: object
+                  requireAllNodes:
+                    description: |-
+                      requireAllNodes when true, waits for ALL worker nodes matching nodeSelector to be ready
+                      When false, uses minReadyNodes instead
+                      This field is required - you must explicitly choose the behavior
+                    type: boolean
+                  timeoutSeconds:
+                    default: 60
+                    description: |-
+                      timeoutSeconds is the maximum time to wait for nodes to become ready
+                      After timeout, startup action proceeds with available nodes
+                      Default: 60
+                    format: int32
+                    maximum: 600
+                    minimum: 0
+                    type: integer
+                required:
+                - requireAllNodes
+                type: object
               startupPolicy:
                 description: |-
                   startupPolicy defines the behavior when the operator starts.
@@ -288,6 +333,16 @@ spec:
                 - Resumed
                 - Failed
                 type: string
+              startupNodesWaited:
+                description: startupNodesWaited records how many seconds we waited
+                  for nodes during startup
+                format: int32
+                type: integer
+              startupReadyNodes:
+                description: startupReadyNodes records how many nodes were ready when
+                  startup action was applied
+                format: int32
+                type: integer
             type: object
         required:
         - spec

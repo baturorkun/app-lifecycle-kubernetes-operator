@@ -30,7 +30,7 @@ spec:
   # after a Resume operation. Only applies when action is Resume.
   # balancePods: true
 
-  # balanceWindowSeconds defines how long (in seconds) after resume the operator
+  # balanceWindowSeconds defines how long (in seconds) after resume tsimdihe operator
   # will automatically trigger rolling restarts. Only used if balancePods is true.
   # Default: 600 (10 minutes). Range: 0-3600
   # balanceWindowSeconds: 600
@@ -41,6 +41,17 @@ spec:
   # terminationGracePeriodSeconds:
   #   deployment: 10
   #   statefulSet: 60
+
+  # startupNodeReadinessPolicy defines node readiness requirements before applying startup policy.
+  # Only applies when startupPolicy is Resume or Freeze.
+  # This helps ensure pods are distributed across all available nodes when operator starts.
+  # startupNodeReadinessPolicy:
+  #   enabled: true
+  #   timeoutSeconds: 120         # Wait max 2 minutes for nodes
+  #   requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
+  #   minReadyNodes: 2             # Only used when requireAllNodes: false
+  #   nodeSelector:
+  #     node-role.kubernetes.io/worker: ""
 
   # selector is optional - if not specified, all Deployments and StatefulSets will be affected
   # selector:

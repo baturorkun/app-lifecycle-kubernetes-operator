@@ -310,6 +310,27 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		return nil
 	}
 
+	// Node readiness check
+	if policy.Spec.StartupNodeReadinessPolicy != nil && policy.Spec.StartupNodeReadinessPolicy.Enabled {
+		log.Info("Node readiness check enabled, waiting for nodes...",
+			"policy", policy.Name)
+
+		readyNodes, secondsWaited, err := r.waitForNodesReady(ctx, policy.Spec.StartupNodeReadinessPolicy)
+		if err != nil {
+			log.Error(err, "Error while waiting for nodes")
+			// Continue anyway - we don't fail startup
+		}
+
+		// Record metrics
+		policy.Status.StartupReadyNodes = &readyNodes
+		policy.Status.StartupNodesWaited = &secondsWaited
+
+		log.Info("Node readiness check completed",
+			"policy", policy.Name,
+			"readyNodes", readyNodes,
+			"secondsWaited", secondsWaited)
+	}
+
 	// Determine desired phase based on startup policy
 	var desiredPhase appsv1alpha1.Phase
 	var action appsv1alpha1.LifecycleAction
@@ -746,6 +767,195 @@ func isNodeReady(node *corev1.Node) bool {
 		}
 	}
 	return false
+}
+
+// countTotalWorkerNodes counts the total number of worker nodes matching the selector (regardless of readiness)
+func (r *NamespaceLifecyclePolicyReconciler) countTotalWorkerNodes(ctx context.Context, nodeSelector map[string]string) (int32, error) {
+	log := logf.FromContext(ctx)
+
+	// Default selector if not specified
+	if nodeSelector == nil || len(nodeSelector) == 0 {
+		nodeSelector = map[string]string{
+			"node-role.kubernetes.io/worker": "",
+		}
+	}
+
+	// List all nodes first, then filter by label selector
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		log.Error(err, "Failed to list nodes")
+		return 0, err
+	}
+
+	// Filter nodes by selector
+	totalCount := int32(0)
+	for _, node := range nodeList.Items {
+		matchesSelector := true
+		for key, value := range nodeSelector {
+			nodeValue, exists := node.Labels[key]
+			if !exists || nodeValue != value {
+				matchesSelector = false
+				break
+			}
+		}
+		if matchesSelector {
+			totalCount++
+		}
+	}
+
+	return totalCount, nil
+}
+
+// countReadyWorkerNodes counts the number of ready worker nodes matching the selector
+func (r *NamespaceLifecyclePolicyReconciler) countReadyWorkerNodes(ctx context.Context, nodeSelector map[string]string) (int32, error) {
+	log := logf.FromContext(ctx)
+
+	// Default selector if not specified
+	if nodeSelector == nil || len(nodeSelector) == 0 {
+		nodeSelector = map[string]string{
+			"node-role.kubernetes.io/worker": "",
+		}
+	}
+
+	log.V(1).Info("Counting ready worker nodes", "nodeSelector", nodeSelector)
+
+	// List all nodes first, then filter by label selector
+	// This is more reliable than client.MatchingLabels with empty string values
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		log.Error(err, "Failed to list nodes")
+		return 0, err
+	}
+
+	log.V(1).Info("Listed all nodes", "totalNodes", len(nodeList.Items))
+
+	// Filter nodes by selector
+	var filteredNodes []corev1.Node
+	for _, node := range nodeList.Items {
+		matchesSelector := true
+		for key, value := range nodeSelector {
+			nodeValue, exists := node.Labels[key]
+			if !exists || nodeValue != value {
+				matchesSelector = false
+				break
+			}
+		}
+		if matchesSelector {
+			filteredNodes = append(filteredNodes, node)
+		}
+	}
+
+	log.V(1).Info("Filtered nodes by selector", "matchingNodes", len(filteredNodes), "nodeSelector", nodeSelector)
+
+	// Count ready nodes
+	readyCount := int32(0)
+	for _, node := range filteredNodes {
+		ready := isNodeReady(&node)
+		log.V(1).Info("Checking node", "name", node.Name, "ready", ready, "labels", node.Labels)
+		if ready {
+			readyCount++
+		}
+	}
+
+	log.V(1).Info("Ready worker node count", "readyCount", readyCount, "totalChecked", len(filteredNodes))
+
+	return readyCount, nil
+}
+
+// waitForNodesReady waits for minimum number of worker nodes to be ready
+// Returns the number of ready nodes and seconds waited
+func (r *NamespaceLifecyclePolicyReconciler) waitForNodesReady(
+	ctx context.Context,
+	policy *appsv1alpha1.StartupNodeReadinessPolicy,
+) (readyNodes int32, secondsWaited int32, err error) {
+	log := logf.FromContext(ctx)
+
+	// Get configuration with defaults
+	timeout := int32(60) // default
+	if policy.TimeoutSeconds > 0 {
+		timeout = policy.TimeoutSeconds
+	}
+
+	minNodes := int32(1) // default
+
+	// Use the required field directly - no default needed
+	requireAll := policy.RequireAllNodes
+
+	if requireAll {
+		// Wait for ALL matching nodes
+		totalNodes, err := r.countTotalWorkerNodes(ctx, policy.NodeSelector)
+		if err != nil {
+			log.Error(err, "Failed to count total worker nodes")
+			// Fall back to default minNodes
+			minNodes = 1
+		} else {
+			minNodes = totalNodes
+			log.Info("requireAllNodes enabled, waiting for all matching nodes",
+				"totalNodes", totalNodes,
+				"nodeSelector", policy.NodeSelector)
+		}
+	} else {
+		// Use minReadyNodes
+		if policy.MinReadyNodes > 0 {
+			minNodes = policy.MinReadyNodes
+		}
+		log.Info("requireAllNodes disabled, using minReadyNodes",
+			"minReadyNodes", minNodes)
+	}
+
+	log.Info("Waiting for worker nodes to be ready",
+		"minReadyNodes", minNodes,
+		"requireAllNodes", requireAll,
+		"timeoutSeconds", timeout,
+		"nodeSelector", policy.NodeSelector)
+
+	startTime := time.Now()
+	ticker := time.NewTicker(2 * time.Second) // Check every 2 seconds
+	defer ticker.Stop()
+
+	timeoutChan := time.After(time.Duration(timeout) * time.Second)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return 0, 0, ctx.Err()
+
+		case <-timeoutChan:
+			// Timeout reached, count final nodes and proceed
+			finalCount, err := r.countReadyWorkerNodes(ctx, policy.NodeSelector)
+			elapsed := int32(time.Since(startTime).Seconds())
+
+			log.Info("⏱️  Node readiness timeout reached, proceeding with available nodes",
+				"readyNodes", finalCount,
+				"minReadyNodes", minNodes,
+				"secondsWaited", elapsed)
+
+			return finalCount, elapsed, err
+
+		case <-ticker.C:
+			// Check node count
+			count, err := r.countReadyWorkerNodes(ctx, policy.NodeSelector)
+			if err != nil {
+				log.Error(err, "Failed to count ready nodes")
+				continue
+			}
+
+			elapsed := int32(time.Since(startTime).Seconds())
+			log.V(1).Info("Checking node readiness",
+				"readyNodes", count,
+				"minReadyNodes", minNodes,
+				"elapsed", elapsed)
+
+			// Check if minimum met
+			if count >= minNodes {
+				log.Info("✅ Minimum worker nodes ready",
+					"readyNodes", count,
+					"minReadyNodes", minNodes,
+					"secondsWaited", elapsed)
+				return count, elapsed, nil
+			}
+		}
+	}
 }
 
 // mapNodeReadyToPolicy maps Node Ready/NotReady events to NamespaceLifecyclePolicy resources
