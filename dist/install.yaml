@@ -1,0 +1,694 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+    control-plane: controller-manager
+  name: app-lifecycle-kubernetes-operator-system
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: namespacelifecyclepolicies.apps.ops.dev
+spec:
+  group: apps.ops.dev
+  names:
+    kind: NamespaceLifecyclePolicy
+    listKind: NamespaceLifecyclePolicyList
+    plural: namespacelifecyclepolicies
+    singular: namespacelifecyclepolicy
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NamespaceLifecyclePolicy is the Schema for the namespacelifecyclepolicies
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of NamespaceLifecyclePolicy
+            properties:
+              action:
+                description: |-
+                  action defines the lifecycle operation to perform on the target namespace.
+                  Valid values are:
+                  - "Freeze": Prevents new deployments and modifications in the namespace
+                  - "Resume": Allows normal operations in the namespace
+                  This field is required.
+                enum:
+                - Freeze
+                - Resume
+                type: string
+              balancePods:
+                description: |-
+                  balancePods enables automatic pod redistribution when new nodes become Ready
+                  after a Resume operation. Works in conjunction with balanceWindowSeconds.
+                  When enabled, the operator watches for node Ready events and triggers rolling
+                  restarts to redistribute pods across all available nodes.
+                  Only applies when action is Resume.
+                type: boolean
+              balanceWindowSeconds:
+                default: 600
+                description: |-
+                  balanceWindowSeconds defines the time window (in seconds) after Resume
+                  during which the operator will automatically trigger rolling restarts
+                  when new nodes become Ready. This ensures balanced pod distribution.
+                  Only used when balancePods is true.
+                  Default: 600 (10 minutes)
+                format: int32
+                maximum: 3600
+                minimum: 0
+                type: integer
+              operationId:
+                description: |-
+                  operationId is an optional identifier for this operation.
+                  Can be used for tracking and correlation purposes.
+                type: string
+              selector:
+                description: |-
+                  selector is a label selector to filter which Deployments and StatefulSets
+                  in the target namespace should be affected by this policy.
+                  If not specified, all Deployments and StatefulSets in the namespace will be affected.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              startupNodeReadinessPolicy:
+                description: |-
+                  startupNodeReadinessPolicy defines node readiness requirements before
+                  applying startup policy. Only applies when startupPolicy is Resume or Freeze.
+                properties:
+                  enabled:
+                    description: enabled activates node readiness checking before
+                      applying startup policy
+                    type: boolean
+                  minReadyNodes:
+                    default: 1
+                    description: |-
+                      minReadyNodes is the minimum number of ready worker nodes required
+                      before applying startup action
+                      Only used when requireAllNodes is false
+                      Default: 1
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      nodeSelector selects which nodes to count as workers
+                      Default: {"node-role.kubernetes.io/worker": ""}
+                    type: object
+                  requireAllNodes:
+                    description: |-
+                      requireAllNodes when true, waits for ALL worker nodes matching nodeSelector to be ready
+                      When false, uses minReadyNodes instead
+                      This field is required - you must explicitly choose the behavior
+                    type: boolean
+                  timeoutSeconds:
+                    default: 60
+                    description: |-
+                      timeoutSeconds is the maximum time to wait for nodes to become ready
+                      After timeout, startup action proceeds with available nodes
+                      Default: 60
+                    format: int32
+                    maximum: 600
+                    minimum: 0
+                    type: integer
+                required:
+                - requireAllNodes
+                type: object
+              startupPolicy:
+                description: |-
+                  startupPolicy defines the behavior when the operator starts.
+                  Valid values are:
+                  - "Ignore": No action taken at startup
+                  - "Resume": Resume the namespace at startup
+                  - "Freeze": Freeze the namespace at startup
+                  This field is required.
+                enum:
+                - Ignore
+                - Resume
+                - Freeze
+                type: string
+              targetNamespace:
+                description: |-
+                  targetNamespace specifies the name of the namespace to which this policy applies.
+                  This field is required and must reference an existing namespace.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              terminationGracePeriodSeconds:
+                description: terminationGracePeriodSeconds defines graceful shutdown
+                  settings for different resource types.
+                properties:
+                  deployment:
+                    description: deployment specifies the terminationGracePeriodSeconds
+                      for Deployments.
+                    format: int64
+                    maximum: 300
+                    minimum: 0
+                    type: integer
+                  statefulSet:
+                    description: statefulSet specifies the terminationGracePeriodSeconds
+                      for StatefulSets.
+                    format: int64
+                    maximum: 300
+                    minimum: 0
+                    type: integer
+                type: object
+            required:
+            - action
+            - startupPolicy
+            - targetNamespace
+            type: object
+          status:
+            description: status defines the observed state of NamespaceLifecyclePolicy
+            properties:
+              conditions:
+                description: |-
+                  conditions represent the current state of the NamespaceLifecyclePolicy resource.
+                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+
+                  Standard condition types include:
+                  - "Available": the resource is fully functional
+                  - "Progressing": the resource is being created or updated
+                  - "Degraded": the resource failed to reach or maintain its desired state
+
+                  The status of each condition is one of True, False, or Unknown.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastHandledOperationId:
+                description: |-
+                  lastHandledOperationId stores the operation ID of the last successfully handled operation.
+                  This helps track which operations have been processed by the controller.
+                type: string
+              lastResumeAt:
+                description: |-
+                  lastResumeAt stores the timestamp when the last Resume operation completed.
+                  Used to determine if automatic pod balancing should still be active.
+                  Only set when action is Resume and the operation completes successfully.
+                format: date-time
+                type: string
+              lastStartupAction:
+                description: |-
+                  lastStartupAction records the action taken during the last startup policy check
+                  Possible values:
+                  - FREEZE_APPLIED - Startup policy froze the namespace
+                  - RESUME_APPLIED - Startup policy resumed the namespace
+                  - NO_ACTION_ALREADY_FROZEN - Already frozen, no action needed
+                  - NO_ACTION_ALREADY_RESUMED - Already resumed, no action needed
+                  - SKIPPED_IGNORE - StartupPolicy is set to Ignore
+                  - SKIPPED_NAMESPACE_NOT_FOUND - Target namespace doesn't exist
+                type: string
+              lastStartupAt:
+                description: |-
+                  lastStartupAt stores the timestamp when startup policy was last checked
+                  This is updated every time the operator starts and evaluates the startup policy
+                format: date-time
+                type: string
+              message:
+                description: |-
+                  message provides a human-readable message about the current status.
+                  This field typically contains details about the current operation or any errors encountered.
+                type: string
+              phase:
+                description: |-
+                  phase represents the current phase of the namespace lifecycle operation.
+                  Possible values are: Idle, Freezing, Frozen, Resuming, Active, Failed
+                enum:
+                - Idle
+                - Freezing
+                - Frozen
+                - Resuming
+                - Resumed
+                - Failed
+                type: string
+              startupNodesWaited:
+                description: startupNodesWaited records how many seconds we waited
+                  for nodes during startup
+                format: int32
+                type: integer
+              startupReadyNodes:
+                description: startupReadyNodes records how many nodes were ready when
+                  startup action was applied
+                format: int32
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-controller-manager
+  namespace: app-lifecycle-kubernetes-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-leader-election-role
+  namespace: app-lifecycle-kubernetes-operator-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-lifecycle-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-lifecycle-metrics-auth-role
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: app-lifecycle-metrics-reader
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-namespacelifecyclepolicy-admin-role
+rules:
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies
+  verbs:
+  - '*'
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-namespacelifecyclepolicy-editor-role
+rules:
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-namespacelifecyclepolicy-viewer-role
+rules:
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps.ops.dev
+  resources:
+  - namespacelifecyclepolicies/status
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-leader-election-rolebinding
+  namespace: app-lifecycle-kubernetes-operator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-lifecycle-leader-election-role
+subjects:
+- kind: ServiceAccount
+  name: app-lifecycle-controller-manager
+  namespace: app-lifecycle-kubernetes-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+  name: app-lifecycle-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: app-lifecycle-manager-role
+subjects:
+- kind: ServiceAccount
+  name: app-lifecycle-controller-manager
+  namespace: app-lifecycle-kubernetes-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: app-lifecycle-metrics-auth-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: app-lifecycle-metrics-auth-role
+subjects:
+- kind: ServiceAccount
+  name: app-lifecycle-controller-manager
+  namespace: app-lifecycle-kubernetes-operator-system
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+    control-plane: controller-manager
+  name: app-lifecycle-controller-manager-metrics-service
+  namespace: app-lifecycle-kubernetes-operator-system
+spec:
+  ports:
+  - name: https
+    port: 8443
+    protocol: TCP
+    targetPort: 8443
+  selector:
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+    control-plane: controller-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+    control-plane: controller-manager
+  name: app-lifecycle-controller-manager
+  namespace: app-lifecycle-kubernetes-operator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+      control-plane: controller-manager
+  template:
+    metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: manager
+      labels:
+        app.kubernetes.io/name: app-lifecycle-kubernetes-operator
+        control-plane: controller-manager
+    spec:
+      containers:
+      - args:
+        - --metrics-bind-address=:8443
+        - --leader-elect
+        - --health-probe-bind-address=:8081
+        command:
+        - /manager
+        image: ghcr.io/baturorkun/app-lifecycle-kubernetes-operator:latest
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        name: manager
+        ports: []
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts: []
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: app-lifecycle-controller-manager
+      terminationGracePeriodSeconds: 10
+      volumes: []

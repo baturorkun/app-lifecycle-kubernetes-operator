@@ -47,7 +47,7 @@ spec:
   # This helps ensure pods are distributed across all available nodes when operator starts.
   # startupNodeReadinessPolicy:
   #   enabled: true
-  #   timeoutSeconds: 120         # Wait max 2 minutes for nodes
+  #   timeoutSeconds: 120          # Wait max 2 minutes for nodes
   #   requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
   #   minReadyNodes: 2             # Only used when requireAllNodes: false
   #   nodeSelector:
