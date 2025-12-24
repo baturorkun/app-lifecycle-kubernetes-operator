@@ -1,0 +1,80 @@
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-platform controller image
+        run: |
+          IMG=ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          # Build for amd64 and arm64 (Apple Silicon, ARM servers)
+          make docker-buildx IMG=$IMG PLATFORMS=linux/amd64,linux/arm64
+
+      - name: Generate install.yaml
+        run: |
+          IMG=ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          make manifests
+          make kustomize
+          cd config/manager && ../../bin/kustomize edit set image controller=$IMG
+          cd ../..
+          mkdir -p dist
+          ./bin/kustomize build config/default > dist/install.yaml
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum install.yaml > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release + upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/install.yaml
+            dist/checksums.txt
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ### Quick Install
+            ```bash
+            kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
+            ```
+
+            ### Docker Images
+            **Multi-platform support:** amd64, arm64
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+            ### Verification
+            Download and verify the checksum:
+            ```bash
+            curl -sL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/checksums.txt
+            ```
