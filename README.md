@@ -32,6 +32,43 @@ selector:
     values: [frontend, backend]
 ```
 
+### ⏱️ Custom Termination Grace Periods
+Override graceful shutdown times during Freeze operations:
+- Set custom `terminationGracePeriodSeconds` for faster shutdowns
+- Separate values for Deployments and StatefulSets
+- Original values automatically restored on Resume
+- Range: 0-300 seconds
+
+Example:
+```yaml
+spec:
+  action: Freeze
+  terminationGracePeriodSeconds:
+    deployment: 15   # Fast shutdown for stateless apps
+    statefulSet: 60  # Longer for stateful apps
+```
+
+### 🚀 Startup Node Readiness Policy
+Wait for worker nodes to be ready before applying startup policy:
+- **Prevents uneven pod distribution**: Ensures pods spread across all nodes
+- **Two modes**: Wait for ALL nodes or minimum N nodes
+- **Configurable timeout**: Max wait time before proceeding
+- **Node selector**: Target specific node types (e.g., only worker nodes)
+- **Status tracking**: Records how many nodes were ready and wait time
+
+Example:
+```yaml
+spec:
+  startupPolicy: Resume
+  startupNodeReadinessPolicy:
+    enabled: true
+    requireAllNodes: true    # Wait for ALL worker nodes (required field)
+    minReadyNodes: 2         # Only used when requireAllNodes: false
+    timeoutSeconds: 120      # Wait max 2 minutes
+    nodeSelector:
+      node-role.kubernetes.io/worker: ""
+```
+
 ### 📊 Comprehensive Status Tracking
 - **Phase**: Current lifecycle state (Idle, Freezing, Frozen, Resuming, Resumed, Failed)
 - **Message**: Human-readable status messages
@@ -39,6 +76,8 @@ selector:
 - **LastStartupAt**: When operator last checked startup policy
 - **LastStartupAction**: What action was taken at startup
 - **LastResumeAt**: Timestamp of last resume operation (used for pod balancing)
+- **StartupReadyNodes**: How many nodes were ready during startup
+- **StartupNodesWaited**: How many seconds waited for nodes during startup
 
 ### ⚖️ Automatic Pod Balancing
 When resuming workloads, pods may end up unevenly distributed if nodes become Ready at different times:
@@ -187,6 +226,68 @@ This will:
 - Ensure pods are evenly distributed across all available nodes
 - Perfect for scenarios where nodes start at different times (cluster scaling, node maintenance)
 
+### Example 6: Fast Freeze with Custom Grace Periods
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: fast-freeze
+  namespace: default
+spec:
+  targetNamespace: test-environment
+  action: Freeze
+  operationId: "fast-freeze-001"
+  startupPolicy: Freeze
+  terminationGracePeriodSeconds:
+    deployment: 10      # Quick shutdown for stateless apps
+    statefulSet: 30     # More time for stateful apps
+```
+
+This will:
+- Freeze all workloads with custom termination grace periods
+- Deployments get 10 seconds to shutdown (instead of default 30)
+- StatefulSets get 30 seconds (instead of default)
+- Original grace periods stored in annotations
+- Automatically restored on Resume
+
+### Example 7: Startup with Node Readiness Check
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: production-policy
+  namespace: default
+spec:
+  targetNamespace: production
+  action: Resume
+  operationId: "prod-startup-001"
+  startupPolicy: Resume
+  startupNodeReadinessPolicy:
+    enabled: true
+    requireAllNodes: true    # Wait for ALL worker nodes
+    timeoutSeconds: 120      # Max 2 minutes wait
+    nodeSelector:
+      node-role.kubernetes.io/worker: ""
+```
+
+This will:
+- Wait for ALL worker nodes to be Ready before resuming (up to 2 minutes)
+- Prevents uneven pod distribution when cluster starts
+- Perfect for operator restarts, node reboots, cluster upgrades
+- Status shows how many nodes were ready and wait time
+- If timeout reached, proceeds with available nodes
+
+**Alternative - Wait for minimum nodes:**
+```yaml
+startupNodeReadinessPolicy:
+  enabled: true
+  requireAllNodes: false   # Use minReadyNodes instead
+  minReadyNodes: 2         # Wait for at least 2 nodes
+  timeoutSeconds: 120
+```
+
 ## API Reference
 
 ### NamespaceLifecyclePolicySpec
@@ -200,6 +301,15 @@ This will:
 | `selector` | LabelSelector | No | Filter resources by labels (all if omitted) |
 | `balancePods` | boolean | No | Enable automatic pod redistribution when nodes become Ready (default: false) |
 | `balanceWindowSeconds` | int32 | No | Time window in seconds for pod balancing after resume (default: 600, max: 3600) |
+| `terminationGracePeriodSeconds` | object | No | Override graceful shutdown time during Freeze (restored on Resume) |
+| `terminationGracePeriodSeconds.deployment` | int64 | No | Grace period for Deployments (0-300 seconds) |
+| `terminationGracePeriodSeconds.statefulSet` | int64 | No | Grace period for StatefulSets (0-300 seconds) |
+| `startupNodeReadinessPolicy` | object | No | Wait for nodes to be ready before applying startup policy |
+| `startupNodeReadinessPolicy.enabled` | boolean | No | Enable node readiness check (default: false) |
+| `startupNodeReadinessPolicy.requireAllNodes` | boolean | **Yes*** | Wait for ALL nodes (true) or use minReadyNodes (false). *Required when startupNodeReadinessPolicy is set |
+| `startupNodeReadinessPolicy.minReadyNodes` | int32 | No | Minimum ready nodes required (only used when requireAllNodes is false, default: 1) |
+| `startupNodeReadinessPolicy.timeoutSeconds` | int32 | No | Max wait time for nodes (default: 60, max: 600) |
+| `startupNodeReadinessPolicy.nodeSelector` | map | No | Select which nodes to count (default: `{"node-role.kubernetes.io/worker": ""}`) |
 
 ### NamespaceLifecyclePolicyStatus
 
@@ -211,6 +321,8 @@ This will:
 | `lastStartupAt` | timestamp | When startup policy was last checked |
 | `lastStartupAction` | string | Action taken at startup (e.g., `FREEZE_APPLIED`, `NO_ACTION_ALREADY_FROZEN`) |
 | `lastResumeAt` | timestamp | When last Resume operation completed (used for pod balancing time window) |
+| `startupReadyNodes` | int32 | How many nodes were ready during startup (when node readiness check enabled) |
+| `startupNodesWaited` | int32 | How many seconds waited for nodes during startup |
 | `conditions` | []Condition | Kubernetes standard conditions (reserved for future use) |
 
 ### Startup Policy Actions
@@ -254,12 +366,27 @@ Status records the result in `lastStartupAction`:
 ### Startup Reconciliation
 When operator starts:
 1. Reads all NamespaceLifecyclePolicy resources
-2. For each policy:
+2. For each policy with `startupNodeReadinessPolicy` enabled:
+   - Waits for nodes to be ready (based on `requireAllNodes` setting)
+   - If `requireAllNodes: true` → counts total nodes and waits for all
+   - If `requireAllNodes: false` → waits for `minReadyNodes`
+   - Records `startupReadyNodes` and `startupNodesWaited` in status
+   - Proceeds after timeout if nodes not ready
+3. For each policy:
    - Checks `startupPolicy` field
    - Compares current `phase` with desired state
    - Only applies action if states differ (smart reconciliation)
    - Updates `lastStartupAt` timestamp
    - Records action in `lastStartupAction`
+
+### Termination Grace Period Override
+During Freeze with `terminationGracePeriodSeconds` set:
+1. For each Deployment/StatefulSet:
+   - Stores original `terminationGracePeriodSeconds` in annotation `apps.ops.dev/original-termination-grace-period`
+   - Applies custom grace period from policy spec
+2. During Resume:
+   - Restores original grace period from annotation
+   - Removes the annotation
 
 ## Monitoring
 
@@ -278,10 +405,12 @@ Example output:
 ```yaml
 status:
   phase: Frozen
-  message: Successfully processed NamespaceLifecyclePolicy
+  message: Successfully froze 2 deployments and 1 statefulsets
   lastHandledOperationId: "op-20231215-001"
-  lastStartupAt: "2025-12-21T00:25:13Z"
-  lastStartupAction: "NO_ACTION_ALREADY_FROZEN"
+  lastStartupAt: "2025-12-24T06:00:43Z"
+  lastStartupAction: "RESUME_APPLIED"
+  startupReadyNodes: 3
+  startupNodesWaited: 5
 ```
 
 ## Development
