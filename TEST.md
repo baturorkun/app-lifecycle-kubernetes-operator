@@ -40,3 +40,6 @@ kubectl drain dev-worker2 --ignore-daemonsets --delete-emptydir-data
 
 # Uncordon node
 kubectl uncordon dev-worker2
+
+# Trigger Reconcile
+kubectl patch namespacelifecyclepolicy nlp --type=merge -p '{"spec":{"action":"Freeze","operationId":"op-020"}}'

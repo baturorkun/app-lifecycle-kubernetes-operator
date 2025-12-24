@@ -194,7 +194,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 		log.Info("Skipping resume: deployment was not frozen",
 			"deployment", deployment.Name,
 			"namespace", deployment.Namespace,
-			"reason", "Missing freeze annotation")
+			"reason", "Deployment has not been frozen by this operator")
 		return nil
 	}
 
@@ -236,7 +236,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 		log.Info("Skipping resume: statefulset was not frozen",
 			"statefulset", sts.Name,
 			"namespace", sts.Namespace,
-			"reason", "Missing freeze annotation")
+			"reason", "StatefulSet has not been frozen by this operator")
 		return nil
 	}
 
@@ -445,8 +445,28 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		log.Info("Startup policy applied: resumed", "policy", policy.Name)
 	}
 
-	// Update status after applying
-	return r.Status().Update(ctx, policy)
+	// Update status after applying - use retry to handle conflicts
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version to avoid conflict errors
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+			return err
+		}
+
+		// Apply all status changes to the latest version
+		latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
+		latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+
+		// Copy node readiness metrics if they were set
+		if policy.Status.StartupReadyNodes != nil {
+			latestPolicy.Status.StartupReadyNodes = policy.Status.StartupReadyNodes
+		}
+		if policy.Status.StartupNodesWaited != nil {
+			latestPolicy.Status.StartupNodesWaited = policy.Status.StartupNodesWaited
+		}
+
+		return r.Status().Update(ctx, latestPolicy)
+	})
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
