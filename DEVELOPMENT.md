@@ -115,10 +115,10 @@ After installation, verify the operator is running:
 kubectl get crd namespacelifecyclepolicies.apps.ops.dev
 
 # Check operator pod (if deployed to cluster)
-kubectl get pods -n app-lifecycle-kubernetes-operator-system
+kubectl get pods -n app-lifecycle-operator
 
 # Check operator logs
-kubectl logs -n app-lifecycle-kubernetes-operator-system <pod-name>
+kubectl logs -n app-lifecycle-operator <pod-name>
 ```
 
 ## Uninstallation
@@ -302,7 +302,7 @@ kubectl create secret docker-registry regcred \
   --docker-username=<username> \
   --docker-password=<password> \
   --docker-email=<email> \
-  -n app-lifecycle-kubernetes-operator-system
+  -n app-lifecycle-operator
 ```
 
 Then patch the deployment to use the secret.

@@ -34,7 +34,7 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "app-lifecycle-kubernetes-operator-system"
+const namespace = "app-lifecycle-operator"
 
 // serviceAccountName created for the project
 const serviceAccountName = "app-lifecycle-kubernetes-operator-controller-manager"

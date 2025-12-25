@@ -426,6 +426,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				log.Error(err, "Failed to freeze statefulset during startup", "name", sts.Name)
 			}
 		}
+		policy.Status.Phase = appsv1alpha1.PhaseFrozen
 		policy.Status.LastStartupAction = "FREEZE_APPLIED"
 		log.Info("Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
@@ -441,6 +442,8 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				log.Error(err, "Failed to resume statefulset during startup", "name", sts.Name)
 			}
 		}
+		policy.Status.Phase = appsv1alpha1.PhaseResumed
+		policy.Status.LastResumeAt = &now
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
 		log.Info("Startup policy applied: resumed", "policy", policy.Name)
 	}
@@ -454,8 +457,14 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 
 		// Apply all status changes to the latest version
+		latestPolicy.Status.Phase = policy.Status.Phase
 		latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
 		latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+
+		// Copy LastResumeAt if set
+		if policy.Status.LastResumeAt != nil {
+			latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
+		}
 
 		// Copy node readiness metrics if they were set
 		if policy.Status.StartupReadyNodes != nil {
