@@ -174,17 +174,21 @@ func (r *NamespaceLifecyclePolicyReconciler) checkPendingPods(
 	pendingCount := int32(0)
 	for _, pod := range podList.Items {
 		if pod.Status.Phase == corev1.PodPending {
-			// Check if pod is unschedulable
+			counted := false
+
+			// Check if pod is unschedulable (more critical)
 			for _, condition := range pod.Status.Conditions {
 				if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionFalse &&
 					condition.Reason == corev1.PodReasonUnschedulable {
 					pendingCount++
+					counted = true
 					break
 				}
 			}
-			// Also count pods that are simply pending (might be container creating, etc.)
-			// This gives us an early warning
-			if pendingCount == 0 {
+
+			// If not unschedulable but still pending (ContainerCreating, ImagePullBackOff, etc.)
+			// count it as well for early warning
+			if !counted {
 				pendingCount++
 			}
 		}

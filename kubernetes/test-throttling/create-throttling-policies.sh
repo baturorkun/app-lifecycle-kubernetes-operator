@@ -53,10 +53,10 @@ for NS in "${NAMESPACES[@]}"; do
     OPERATION_ID="freeze-${TIMESTAMP}-${NS}"
 
     echo ""
-    echo "[$((DELAY/20 + 1))/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
+    echo "[$((DELAY/10 + 1))/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
     echo "  Target NS:     $NS"
     echo "  OperationID:   $OPERATION_ID"
-    echo "  StartupDelay:  ${DELAY}s"
+    echo "  ResumeDelay:   ${DELAY}s"
 
     cat <<EOF | kubectl apply -f -
 apiVersion: apps.ops.dev/v1alpha1
@@ -77,8 +77,8 @@ spec:
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
 
-  # Startup delay for staggering (prevents simultaneous resume burst)
-  startupDelay: ${DELAY}s
+  # Resume delay for staggering (prevents simultaneous resume burst)
+  resumeDelay: ${DELAY}s
 
   # Adaptive throttling configuration for Resume operations
   adaptiveThrottling:
@@ -130,7 +130,7 @@ spec:
 EOF
 
     # Increment delay by 20 seconds for next namespace
-    DELAY=$((DELAY + 20))
+    DELAY=$((DELAY + 10))
 done
 
 # === SUMMARY ===

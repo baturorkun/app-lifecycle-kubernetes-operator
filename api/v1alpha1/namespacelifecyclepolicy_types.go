@@ -151,14 +151,15 @@ type NamespaceLifecyclePolicySpec struct {
 	// +optional
 	StartupNodeReadinessPolicy *StartupNodeReadinessPolicy `json:"startupNodeReadinessPolicy,omitempty"`
 
-	// startupDelay specifies how long to wait before starting the operation.
-	// Applies to both startup (when startupPolicy triggers) and manual operations.
+	// resumeDelay specifies how long to wait before starting a Resume operation.
+	// ONLY applies to Resume operations (action: Resume OR startupPolicy: Resume).
+	// Does NOT apply to Freeze operations.
 	// Useful for staggering multiple namespace resume operations to prevent
 	// simultaneous resume bursts that could overload nodes.
 	// Default: 0s (no delay)
 	// +optional
 	// +kubebuilder:default="0s"
-	StartupDelay metav1.Duration `json:"startupDelay,omitempty"`
+	ResumeDelay metav1.Duration `json:"resumeDelay,omitempty"`
 
 	// adaptiveThrottling enables adaptive throttling during Resume operations
 	// to prevent node overload by monitoring node conditions and pending pods.

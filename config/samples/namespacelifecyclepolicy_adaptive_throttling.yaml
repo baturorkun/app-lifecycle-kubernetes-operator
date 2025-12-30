@@ -18,7 +18,7 @@ spec:
 
   # NEW: Startup delay for staggering multiple namespace resume operations
   # This namespace starts immediately (0s = default)
-  startupDelay: 0s
+  resumeDelay: 0s
 
   # ADAPTIVE THROTTLING CONFIGURATION
   # This enables CPU-aware, adaptive batched resume to prevent node overload

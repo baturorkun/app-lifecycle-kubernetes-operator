@@ -376,6 +376,39 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		return nil
 	}
 
+	// Apply resumeDelay if this is a Resume startup action
+	// Delegate to Reconcile loop for delay handling
+	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.ResumeDelay.Duration > 0 {
+		log.Info("Resume delay configured for startup policy - delegating to Reconcile loop",
+			"delay", policy.Spec.ResumeDelay.Duration,
+			"targetNamespace", policy.Spec.TargetNamespace)
+
+		// Mark this as a startup resume that needs delay
+		// The Reconcile loop will handle the delay and resume
+		if policy.Annotations == nil {
+			policy.Annotations = make(map[string]string)
+		}
+		policy.Annotations["apps.ops.dev/pending-startup-resume"] = "true"
+		policy.Annotations["apps.ops.dev/startup-resume-delay-start"] = time.Now().Format(time.RFC3339)
+
+		if err := r.Update(ctx, policy); err != nil {
+			log.Error(err, "Failed to mark policy for delayed startup resume")
+			return err
+		}
+
+		// Update status to show we're waiting
+		policy.Status.Phase = appsv1alpha1.PhaseIdle
+		policy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.ResumeDelay.Duration)
+		policy.Status.LastStartupAt = &now
+		policy.Status.LastStartupAction = "RESUME_DELAYED"
+		if err := r.Status().Update(ctx, policy); err != nil {
+			log.Error(err, "Failed to update status for delayed startup resume")
+		}
+
+		// Return success - Reconcile loop will handle the actual resume after delay
+		return nil
+	}
+
 	log.Info("Applying startup policy",
 		"policy", policy.Name,
 		"startupPolicy", policy.Spec.StartupPolicy,
@@ -480,12 +513,18 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 
 		// Apply all status changes to the latest version
 		latestPolicy.Status.Phase = policy.Status.Phase
+		latestPolicy.Status.Message = policy.Status.Message
 		latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
 		latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
 
 		// Copy LastResumeAt if set
 		if policy.Status.LastResumeAt != nil {
 			latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
+		}
+
+		// Copy adaptive progress if set (from adaptive throttling resume)
+		if policy.Status.AdaptiveProgress != nil {
+			latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
 		}
 
 		// Copy node readiness metrics if they were set
@@ -572,20 +611,150 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 	}
 
-	// Check for startup delay before processing new operations
-	// Only apply delay for new operations (not yet handled)
+	// Handle pending startup resume with delay
+	if pendingStartup, hasPending := policy.Annotations["apps.ops.dev/pending-startup-resume"]; hasPending && pendingStartup == "true" {
+		delayStartStr := policy.Annotations["apps.ops.dev/startup-resume-delay-start"]
+		if delayStartStr == "" {
+			log.Error(fmt.Errorf("missing delay start time"), "Pending startup resume has no start time")
+			// Clean up and let normal flow handle it
+			delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
+			delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
+			if err := r.Update(ctx, &policy); err != nil {
+				log.Error(err, "Failed to clean up invalid pending startup resume")
+			}
+		} else {
+			delayStart, err := time.Parse(time.RFC3339, delayStartStr)
+			if err != nil {
+				log.Error(err, "Failed to parse startup resume delay start time")
+				// Clean up bad annotation
+				delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
+				delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
+				if err := r.Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to clean up invalid pending startup resume")
+				}
+			} else {
+				elapsed := time.Since(delayStart)
+				if elapsed < policy.Spec.ResumeDelay.Duration {
+					// Delay not yet complete
+					remaining := policy.Spec.ResumeDelay.Duration - elapsed
+					log.V(1).Info("Startup resume delay in progress",
+						"elapsed", elapsed,
+						"remaining", remaining,
+						"policy", policy.Name)
+					return ctrl.Result{RequeueAfter: remaining}, nil
+				}
+
+				// Delay complete! Perform the startup resume now
+				log.Info("Startup resume delay completed - executing resume",
+					"delay", policy.Spec.ResumeDelay.Duration,
+					"policy", policy.Name,
+					"targetNamespace", policy.Spec.TargetNamespace)
+
+				// Clean up the pending marker
+				delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
+				delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
+				if err := r.Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to remove pending startup resume marker")
+					return ctrl.Result{}, err
+				}
+
+				// Execute the resume operation
+				deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+				if err != nil {
+					log.Error(err, "Failed to list deployments for startup resume")
+					return ctrl.Result{}, err
+				}
+
+				statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+				if err != nil {
+					log.Error(err, "Failed to list statefulsets for startup resume")
+					return ctrl.Result{}, err
+				}
+
+				// Check if adaptive throttling is enabled
+				if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+					log.Info("Executing startup resume with adaptive throttling",
+						"policy", policy.Name,
+						"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+					if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
+						log.Error(err, "Failed to resume with adaptive throttling during delayed startup")
+						return ctrl.Result{}, err
+					}
+				} else {
+					// Resume without throttling
+					log.Info("Executing startup resume without throttling",
+						"policy", policy.Name,
+						"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+					for i := range deployments.Items {
+						deployment := &deployments.Items[i]
+						if err := r.resumeDeployment(ctx, deployment); err != nil {
+							log.Error(err, "Failed to resume deployment during delayed startup", "name", deployment.Name)
+						}
+					}
+					for i := range statefulSets.Items {
+						sts := &statefulSets.Items[i]
+						if err := r.resumeStatefulSet(ctx, sts); err != nil {
+							log.Error(err, "Failed to resume statefulset during delayed startup", "name", sts.Name)
+						}
+					}
+				}
+
+				// Update status with retry on conflict
+				now := metav1.Now()
+				policy.Status.Phase = appsv1alpha1.PhaseResumed
+				policy.Status.Message = "Startup resume completed after delay"
+				policy.Status.LastResumeAt = &now
+				policy.Status.LastStartupAction = "RESUME_APPLIED"
+
+				// Use retry to handle conflicts (adaptive throttling may have updated status)
+				if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+					// Fetch latest version
+					latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+					if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+						return err
+					}
+
+					// Apply status changes to latest version
+					latestPolicy.Status.Phase = policy.Status.Phase
+					latestPolicy.Status.Message = policy.Status.Message
+					latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
+					latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+
+					// Copy adaptive progress if set
+					if policy.Status.AdaptiveProgress != nil {
+						latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
+					}
+
+					return r.Status().Update(ctx, latestPolicy)
+				}); err != nil {
+					log.Error(err, "Failed to update status after delayed startup resume")
+					return ctrl.Result{}, err
+				}
+
+				log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
+				return ctrl.Result{}, nil
+			}
+		}
+	}
+
+	// Check for resume delay before processing new Resume operations
+	// Only apply delay for new Resume operations (not yet handled)
 	if policy.Status.LastHandledOperationId != policy.Spec.OperationId {
-		// This is a new operation
-		if policy.Spec.StartupDelay.Duration > 0 {
+		// This is a new operation - check if it's a Resume operation
+		isResumeOperation := policy.Spec.Action == appsv1alpha1.LifecycleActionResume
+
+		if isResumeOperation && policy.Spec.ResumeDelay.Duration > 0 {
 			// Check if we've already started the delay timer
 			// Use a status annotation to track if delay has been applied
 			delayAnnotation := "apps.ops.dev/delay-started-at"
 			delayStartedAt, hasDelay := policy.Annotations[delayAnnotation]
 
 			if !hasDelay {
-				// First time seeing this operation - start the delay
-				log.Info("Applying startup delay before operation",
-					"delay", policy.Spec.StartupDelay.Duration,
+				// First time seeing this Resume operation - start the delay
+				log.Info("Applying resume delay before Resume operation",
+					"delay", policy.Spec.ResumeDelay.Duration,
 					"targetNamespace", policy.Spec.TargetNamespace,
 					"operationId", policy.Spec.OperationId)
 
@@ -601,12 +770,12 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 				// Update status to show we're delaying
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseIdle,
-					fmt.Sprintf("Waiting %s before starting operation", policy.Spec.StartupDelay.Duration)); err != nil {
+					fmt.Sprintf("Waiting %s before starting Resume operation", policy.Spec.ResumeDelay.Duration)); err != nil {
 					log.Error(err, "Failed to update status for delay")
 				}
 
 				// Requeue after the delay duration
-				return ctrl.Result{RequeueAfter: policy.Spec.StartupDelay.Duration}, nil
+				return ctrl.Result{RequeueAfter: policy.Spec.ResumeDelay.Duration}, nil
 			}
 
 			// Delay annotation exists - check if enough time has passed
@@ -622,18 +791,18 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			}
 
 			elapsed := time.Since(startTime)
-			if elapsed < policy.Spec.StartupDelay.Duration {
+			if elapsed < policy.Spec.ResumeDelay.Duration {
 				// Not enough time has passed yet
-				remaining := policy.Spec.StartupDelay.Duration - elapsed
-				log.V(1).Info("Startup delay not yet completed",
+				remaining := policy.Spec.ResumeDelay.Duration - elapsed
+				log.V(1).Info("Resume delay not yet completed",
 					"elapsed", elapsed,
 					"remaining", remaining)
 				return ctrl.Result{RequeueAfter: remaining}, nil
 			}
 
 			// Delay completed! Remove the annotation
-			log.Info("Startup delay completed, proceeding with operation",
-				"delay", policy.Spec.StartupDelay.Duration,
+			log.Info("Resume delay completed, proceeding with operation",
+				"delay", policy.Spec.ResumeDelay.Duration,
 				"targetNamespace", policy.Spec.TargetNamespace)
 			delete(policy.Annotations, delayAnnotation)
 			if err := r.Update(ctx, &policy); err != nil {

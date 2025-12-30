@@ -210,6 +210,16 @@ spec:
                   operationId is an optional identifier for this operation.
                   Can be used for tracking and correlation purposes.
                 type: string
+              resumeDelay:
+                default: 0s
+                description: |-
+                  resumeDelay specifies how long to wait before starting a Resume operation.
+                  ONLY applies to Resume operations (action: Resume OR startupPolicy: Resume).
+                  Does NOT apply to Freeze operations.
+                  Useful for staggering multiple namespace resume operations to prevent
+                  simultaneous resume bursts that could overload nodes.
+                  Default: 0s (no delay)
+                type: string
               selector:
                 description: |-
                   selector is a label selector to filter which Deployments and StatefulSets
@@ -259,15 +269,6 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-              startupDelay:
-                default: 0s
-                description: |-
-                  startupDelay specifies how long to wait before starting the operation.
-                  Applies to both startup (when startupPolicy triggers) and manual operations.
-                  Useful for staggering multiple namespace resume operations to prevent
-                  simultaneous resume bursts that could overload nodes.
-                  Default: 0s (no delay)
-                type: string
               startupNodeReadinessPolicy:
                 description: |-
                   startupNodeReadinessPolicy defines node readiness requirements before

@@ -30,16 +30,16 @@ spec:
   # Can be used for tracking and correlation purposes.
   # operationId: "op-123456789-2"
 
-  # startupDelay specifies how long to wait before starting the operation.
+  # resumeDelay specifies how long to wait before starting the operation.
   # Applies to both startup (when startupPolicy triggers) and manual operations.
   # Useful for staggering multiple namespace resume operations to prevent
   # simultaneous resume bursts that could overload nodes.
   # Default: 0s (no delay)
   # Example: Use different delays for different namespaces:
-  #   namespace-1: startupDelay: 0s    (starts immediately)
-  #   namespace-2: startupDelay: 30s   (waits 30 seconds)
-  #   namespace-3: startupDelay: 60s   (waits 60 seconds)
-  # startupDelay: 0s
+  #   namespace-1: resumeDelay: 0s    (starts immediately)
+  #   namespace-2: resumeDelay: 30s   (waits 30 seconds)
+  #   namespace-3: resumeDelay: 60s   (waits 60 seconds)
+  # resumeDelay: 0s
 
   # ============================================================================
   # WORKLOAD SELECTION
