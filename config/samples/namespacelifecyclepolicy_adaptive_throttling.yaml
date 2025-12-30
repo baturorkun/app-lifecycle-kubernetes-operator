@@ -1,0 +1,155 @@
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: adaptive-throttling-example
+  namespace: default
+spec:
+  # Target namespace to manage
+  targetNamespace: production
+
+  # Resume action with adaptive throttling
+  action: Resume
+
+  # Startup policy
+  startupPolicy: Resume
+
+  # Operation ID for idempotency
+  operationId: "resume-20251229-001"
+
+  # NEW: Startup delay for staggering multiple namespace resume operations
+  # This namespace starts immediately (0s = default)
+  startupDelay: 0s
+
+  # ADAPTIVE THROTTLING CONFIGURATION
+  # This enables CPU-aware, adaptive batched resume to prevent node overload
+  adaptiveThrottling:
+    # Enable adaptive throttling
+    enabled: true
+
+    # Initial batch size - start with 3 workloads at a time
+    initialBatchSize: 3
+
+    # Minimum batch size - never go below 1 workload per batch
+    minBatchSize: 1
+
+    # Wait 5 seconds between batches
+    batchInterval: 5
+
+    # Signal monitoring configuration
+    signalChecks:
+      # Signal 1: Node Ready Status (🔴 Critical - STOP)
+      checkNodeReady:
+        enabled: true
+        waitInterval: 20    # Check every 20 seconds when waiting
+        maxWaitTime: 1800   # Wait max 30 minutes (1800 seconds)
+
+      # Signal 2: Node Pressure (🟡 Warning - SLOW DOWN)
+      checkNodePressure:
+        enabled: true
+        pressureTypes:
+          - MemoryPressure
+          - DiskPressure
+          - PIDPressure
+          - NetworkUnavailable
+        slowdownPercent: 50  # Reduce batch size to 50% when pressure detected
+
+      # Signal 3: Pending Pods (🟠 Info - SLOW DOWN)
+      checkPendingPods:
+        enabled: true
+        threshold: 5          # Trigger if more than 5 pods are pending
+        slowdownPercent: 70   # Reduce batch size to 70% when triggered
+
+    # Which nodes to monitor
+    nodeSelector:
+      node-role.kubernetes.io/worker: ""
+
+    # Fallback behavior if signals cannot be collected
+    fallbackOnMetricsUnavailable: true
+---
+# Example: Minimal configuration (use defaults)
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: adaptive-throttling-minimal
+  namespace: default
+spec:
+  targetNamespace: staging
+  action: Resume
+  startupPolicy: Resume
+
+  adaptiveThrottling:
+    enabled: true
+    # All other settings will use defaults
+---
+# Example: Aggressive throttling (small cluster, very cautious)
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: adaptive-throttling-cautious
+  namespace: default
+spec:
+  targetNamespace: dev
+  action: Resume
+  startupPolicy: Resume
+
+  adaptiveThrottling:
+    enabled: true
+    initialBatchSize: 2    # Start with only 2 workloads
+    minBatchSize: 1
+    batchInterval: 10      # Wait 10 seconds between batches
+
+    signalChecks:
+      checkNodeReady:
+        enabled: true
+        waitInterval: 15
+        maxWaitTime: 900   # 15 minutes
+
+      checkNodePressure:
+        enabled: true
+        pressureTypes:
+          - MemoryPressure
+          - DiskPressure
+        slowdownPercent: 30  # Very aggressive slowdown (30%)
+
+      checkPendingPods:
+        enabled: true
+        threshold: 3         # Trigger at just 3 pending pods
+        slowdownPercent: 50  # Slowdown to 50%
+
+    fallbackOnMetricsUnavailable: false  # Fail if metrics unavailable
+---
+# Example: Fast throttling (large cluster, more tolerant)
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: adaptive-throttling-fast
+  namespace: default
+spec:
+  targetNamespace: test
+  action: Resume
+  startupPolicy: Resume
+
+  adaptiveThrottling:
+    enabled: true
+    initialBatchSize: 10   # Start with 10 workloads
+    minBatchSize: 3        # Don't go below 3
+    batchInterval: 3       # Short interval
+
+    signalChecks:
+      checkNodeReady:
+        enabled: true
+        waitInterval: 30
+        maxWaitTime: 3600  # 60 minutes
+
+      checkNodePressure:
+        enabled: true
+        pressureTypes:
+          - MemoryPressure
+        slowdownPercent: 70  # Moderate slowdown
+
+      checkPendingPods:
+        enabled: true
+        threshold: 10        # More tolerant
+        slowdownPercent: 80  # Mild slowdown
+
+    fallbackOnMetricsUnavailable: true
