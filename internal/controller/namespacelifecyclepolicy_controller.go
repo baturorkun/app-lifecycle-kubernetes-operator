@@ -430,16 +430,33 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		policy.Status.LastStartupAction = "FREEZE_APPLIED"
 		log.Info("Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
-		for i := range deployments.Items {
-			deployment := &deployments.Items[i]
-			if err := r.resumeDeployment(ctx, deployment); err != nil {
-				log.Error(err, "Failed to resume deployment during startup", "name", deployment.Name)
+		// Check if adaptive throttling is enabled
+		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+			log.Info("Startup policy: using adaptive throttling for resume",
+				"policy", policy.Name,
+				"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+			if err := r.resumeWithAdaptiveThrottling(ctx, policy, deployments, statefulSets); err != nil {
+				log.Error(err, "Failed to resume with adaptive throttling during startup")
+				return err
 			}
-		}
-		for i := range statefulSets.Items {
-			sts := &statefulSets.Items[i]
-			if err := r.resumeStatefulSet(ctx, sts); err != nil {
-				log.Error(err, "Failed to resume statefulset during startup", "name", sts.Name)
+		} else {
+			// Fallback: resume all workloads immediately (old behavior)
+			log.Info("Startup policy: resuming all workloads immediately (no throttling)",
+				"policy", policy.Name,
+				"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+			for i := range deployments.Items {
+				deployment := &deployments.Items[i]
+				if err := r.resumeDeployment(ctx, deployment); err != nil {
+					log.Error(err, "Failed to resume deployment during startup", "name", deployment.Name)
+				}
+			}
+			for i := range statefulSets.Items {
+				sts := &statefulSets.Items[i]
+				if err := r.resumeStatefulSet(ctx, sts); err != nil {
+					log.Error(err, "Failed to resume statefulset during startup", "name", sts.Name)
+				}
 			}
 		}
 		policy.Status.Phase = appsv1alpha1.PhaseResumed
@@ -547,6 +564,78 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				// Stop reconciliation
 				return ctrl.Result{}, nil
 			}
+		}
+	}
+
+	// Check for startup delay before processing new operations
+	// Only apply delay for new operations (not yet handled)
+	if policy.Status.LastHandledOperationId != policy.Spec.OperationId {
+		// This is a new operation
+		if policy.Spec.StartupDelay.Duration > 0 {
+			// Check if we've already started the delay timer
+			// Use a status annotation to track if delay has been applied
+			delayAnnotation := "apps.ops.dev/delay-started-at"
+			delayStartedAt, hasDelay := policy.Annotations[delayAnnotation]
+
+			if !hasDelay {
+				// First time seeing this operation - start the delay
+				log.Info("Applying startup delay before operation",
+					"delay", policy.Spec.StartupDelay.Duration,
+					"targetNamespace", policy.Spec.TargetNamespace,
+					"operationId", policy.Spec.OperationId)
+
+				// Add annotation to mark delay start time
+				if policy.Annotations == nil {
+					policy.Annotations = make(map[string]string)
+				}
+				policy.Annotations[delayAnnotation] = time.Now().Format(time.RFC3339)
+				if err := r.Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to add delay annotation")
+					return ctrl.Result{}, err
+				}
+
+				// Update status to show we're delaying
+				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseIdle,
+					fmt.Sprintf("Waiting %s before starting operation", policy.Spec.StartupDelay.Duration)); err != nil {
+					log.Error(err, "Failed to update status for delay")
+				}
+
+				// Requeue after the delay duration
+				return ctrl.Result{RequeueAfter: policy.Spec.StartupDelay.Duration}, nil
+			}
+
+			// Delay annotation exists - check if enough time has passed
+			startTime, err := time.Parse(time.RFC3339, delayStartedAt)
+			if err != nil {
+				log.Error(err, "Failed to parse delay start time", "value", delayStartedAt)
+				// Clear bad annotation and retry
+				delete(policy.Annotations, delayAnnotation)
+				if err := r.Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to remove invalid delay annotation")
+				}
+				return ctrl.Result{Requeue: true}, nil
+			}
+
+			elapsed := time.Since(startTime)
+			if elapsed < policy.Spec.StartupDelay.Duration {
+				// Not enough time has passed yet
+				remaining := policy.Spec.StartupDelay.Duration - elapsed
+				log.V(1).Info("Startup delay not yet completed",
+					"elapsed", elapsed,
+					"remaining", remaining)
+				return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+
+			// Delay completed! Remove the annotation
+			log.Info("Startup delay completed, proceeding with operation",
+				"delay", policy.Spec.StartupDelay.Duration,
+				"targetNamespace", policy.Spec.TargetNamespace)
+			delete(policy.Annotations, delayAnnotation)
+			if err := r.Update(ctx, &policy); err != nil {
+				log.Error(err, "Failed to remove delay annotation")
+				return ctrl.Result{}, err
+			}
+			// Fall through to normal operation processing
 		}
 	}
 
@@ -730,31 +819,54 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 	case appsv1alpha1.LifecycleActionResume:
-		// Resume all deployments
-		for i := range deployments.Items {
-			deployment := &deployments.Items[i]
-			log.Info("Resuming deployment", "name", deployment.Name)
-			if err := r.resumeDeployment(ctx, deployment); err != nil {
-				log.Error(err, "Failed to resume deployment", "name", deployment.Name)
+		// Check if adaptive throttling is enabled
+		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+			// Use adaptive throttling
+			log.Info("Resuming with adaptive throttling enabled",
+				"initialBatchSize", policy.Spec.AdaptiveThrottling.InitialBatchSize,
+				"deployments", len(deployments.Items),
+				"statefulsets", len(statefulSets.Items))
+
+			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
+				log.Error(err, "Failed to resume with adaptive throttling")
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err)); err != nil {
+					fmt.Sprintf("Failed to resume: %v", err)); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
 			}
-		}
+		} else {
+			// Use legacy resume (all at once)
+			log.Info("Resuming without throttling (legacy mode)",
+				"deployments", len(deployments.Items),
+				"statefulsets", len(statefulSets.Items))
 
-		// Resume all statefulsets
-		for i := range statefulSets.Items {
-			sts := &statefulSets.Items[i]
-			log.Info("Resuming statefulset", "name", sts.Name)
-			if err := r.resumeStatefulSet(ctx, sts); err != nil {
-				log.Error(err, "Failed to resume statefulset", "name", sts.Name)
-				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err)); err != nil {
-					log.Error(err, "Failed to update status")
+			// Resume all deployments
+			for i := range deployments.Items {
+				deployment := &deployments.Items[i]
+				log.Info("Resuming deployment", "name", deployment.Name)
+				if err := r.resumeDeployment(ctx, deployment); err != nil {
+					log.Error(err, "Failed to resume deployment", "name", deployment.Name)
+					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
+						fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err)); err != nil {
+						log.Error(err, "Failed to update status")
+					}
+					return ctrl.Result{}, err
 				}
-				return ctrl.Result{}, err
+			}
+
+			// Resume all statefulsets
+			for i := range statefulSets.Items {
+				sts := &statefulSets.Items[i]
+				log.Info("Resuming statefulset", "name", sts.Name)
+				if err := r.resumeStatefulSet(ctx, sts); err != nil {
+					log.Error(err, "Failed to resume statefulset", "name", sts.Name)
+					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
+						fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err)); err != nil {
+						log.Error(err, "Failed to update status")
+					}
+					return ctrl.Result{}, err
+				}
 			}
 		}
 
@@ -774,6 +886,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				len(deployments.Items), len(statefulSets.Items))
 			latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
 			latestPolicy.Status.LastResumeAt = &now
+			// Clear adaptive progress after successful completion
+			latestPolicy.Status.AdaptiveProgress = nil
 
 			return r.Status().Update(ctx, latestPolicy)
 		})

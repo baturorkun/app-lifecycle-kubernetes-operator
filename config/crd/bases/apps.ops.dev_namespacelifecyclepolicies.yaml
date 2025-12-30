@@ -51,6 +51,140 @@ spec:
                 - Freeze
                 - Resume
                 type: string
+              adaptiveThrottling:
+                description: |-
+                  adaptiveThrottling enables adaptive throttling during Resume operations
+                  to prevent node overload by monitoring node conditions and pending pods.
+                  Only applies when action is Resume.
+                properties:
+                  batchInterval:
+                    default: 5
+                    description: |-
+                      batchInterval is the wait time between batches in seconds
+                      Default: 5
+                    format: int32
+                    maximum: 60
+                    minimum: 0
+                    type: integer
+                  enabled:
+                    description: enabled activates adaptive throttling during Resume
+                      operations
+                    type: boolean
+                  fallbackOnMetricsUnavailable:
+                    default: true
+                    description: |-
+                      fallbackOnMetricsUnavailable when true, continues resume without throttling
+                      if node metrics or signals cannot be collected
+                      Default: true
+                    type: boolean
+                  initialBatchSize:
+                    default: 3
+                    description: |-
+                      initialBatchSize is the starting number of workloads to resume in each batch
+                      Default: 3
+                    format: int32
+                    maximum: 20
+                    minimum: 1
+                    type: integer
+                  minBatchSize:
+                    default: 1
+                    description: |-
+                      minBatchSize is the minimum batch size when throttling
+                      Default: 1
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      nodeSelector selects which nodes to monitor for signals
+                      Default: {"node-role.kubernetes.io/worker": ""}
+                    type: object
+                  signalChecks:
+                    description: signalChecks defines which signals to monitor and
+                      how to respond
+                    properties:
+                      checkNodePressure:
+                        description: checkNodePressure enables monitoring of node
+                          pressure conditions
+                        properties:
+                          enabled:
+                            description: enabled activates node pressure checking
+                            type: boolean
+                          pressureTypes:
+                            description: |-
+                              pressureTypes lists which pressure conditions to monitor
+                              Valid values: MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable
+                            items:
+                              type: string
+                            type: array
+                          slowdownPercent:
+                            default: 50
+                            description: |-
+                              slowdownPercent is the percentage of initial batch size to use when pressure detected
+                              For example, 50 means reduce batch size to 50% of initial value
+                              Default: 50
+                            format: int32
+                            maximum: 100
+                            minimum: 10
+                            type: integer
+                        type: object
+                      checkNodeReady:
+                        description: checkNodeReady enables monitoring of node Ready
+                          status
+                        properties:
+                          enabled:
+                            description: enabled activates node Ready status checking
+                            type: boolean
+                          maxWaitTime:
+                            default: 1800
+                            description: |-
+                              maxWaitTime is the maximum time to wait for nodes to become ready (in seconds)
+                              Default: 1800 (30 minutes)
+                            format: int32
+                            maximum: 7200
+                            minimum: 60
+                            type: integer
+                          waitInterval:
+                            default: 20
+                            description: |-
+                              waitInterval is how often to check node status when waiting (in seconds)
+                              Default: 20
+                            format: int32
+                            maximum: 300
+                            minimum: 5
+                            type: integer
+                        type: object
+                      checkPendingPods:
+                        description: checkPendingPods enables monitoring of pending
+                          pods
+                        properties:
+                          enabled:
+                            description: enabled activates pending pods checking
+                            type: boolean
+                          slowdownPercent:
+                            default: 70
+                            description: |-
+                              slowdownPercent is the percentage of current batch size to use when pending pods exceed threshold
+                              For example, 70 means reduce batch size to 70% of current value
+                              Default: 70
+                            format: int32
+                            maximum: 100
+                            minimum: 10
+                            type: integer
+                          threshold:
+                            default: 5
+                            description: |-
+                              threshold is the number of pending pods that triggers throttling
+                              Default: 5
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                        type: object
+                    type: object
+                type: object
               balancePods:
                 description: |-
                   balancePods enables automatic pod redistribution when new nodes become Ready
@@ -125,6 +259,15 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              startupDelay:
+                default: 0s
+                description: |-
+                  startupDelay specifies how long to wait before starting the operation.
+                  Applies to both startup (when startupPolicy triggers) and manual operations.
+                  Useful for staggering multiple namespace resume operations to prevent
+                  simultaneous resume bursts that could overload nodes.
+                  Default: 0s (no delay)
+                type: string
               startupNodeReadinessPolicy:
                 description: |-
                   startupNodeReadinessPolicy defines node readiness requirements before
@@ -218,6 +361,75 @@ spec:
           status:
             description: status defines the observed state of NamespaceLifecyclePolicy
             properties:
+              adaptiveProgress:
+                description: |-
+                  adaptiveProgress tracks progress of adaptive throttling during Resume operations
+                  Only populated when adaptiveThrottling is enabled
+                properties:
+                  activeSignals:
+                    description: activeSignals lists the currently active signals
+                      affecting throttling
+                    items:
+                      description: Signal represents a detected condition that affects
+                        throttling
+                      properties:
+                        condition:
+                          description: condition is the specific condition type (for
+                            pressure signals)
+                          type: string
+                        count:
+                          description: count is a numeric value associated with the
+                            signal (e.g., pending pod count)
+                          format: int32
+                          type: integer
+                        message:
+                          description: message provides human-readable details about
+                            the signal
+                          type: string
+                        node:
+                          description: node is the name of the affected node (for
+                            node-related signals)
+                          type: string
+                        severity:
+                          description: severity indicates how critical the signal
+                            is
+                          enum:
+                          - Critical
+                          - Warning
+                          - Info
+                          type: string
+                        type:
+                          description: type is the type of signal
+                          enum:
+                          - NodeNotReady
+                          - NodePressure
+                          - PendingPods
+                          type: string
+                      type: object
+                    type: array
+                  currentBatchSize:
+                    description: currentBatchSize is the current batch size being
+                      used (dynamically adjusted)
+                    format: int32
+                    type: integer
+                  lastCheckTime:
+                    description: lastCheckTime is when signals were last checked
+                    format: date-time
+                    type: string
+                  message:
+                    description: message provides human-readable progress information
+                    type: string
+                  resumedWorkloads:
+                    description: resumedWorkloads is the number of workloads successfully
+                      resumed so far
+                    format: int32
+                    type: integer
+                  totalWorkloads:
+                    description: totalWorkloads is the total number of workloads to
+                      resume
+                    format: int32
+                    type: integer
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the NamespaceLifecyclePolicy resource.

@@ -6,7 +6,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: namespacelifecyclepolicy-sample
 spec:
-  # --- MANDATORY FIELDS ---
+  # ============================================================================
+  # MANDATORY FIELDS
+  # ============================================================================
 
   # targetNamespace specifies the name of the namespace to which this policy applies.
   # This field is required and must reference an existing namespace.
@@ -20,38 +22,28 @@ spec:
   # Valid values: "Ignore", "Resume", "Freeze"
   startupPolicy: Resume
 
-  # --- OPTIONAL FIELDS ---
+  # ============================================================================
+  # OPTIONAL FIELDS
+  # ============================================================================
 
   # operationId is an optional identifier for this operation.
   # Can be used for tracking and correlation purposes.
   # operationId: "op-123456789-2"
 
-  # balancePods enables automatic pod redistribution when new nodes become Ready
-  # after a Resume operation. Only applies when action is Resume.
-  # balancePods: true
+  # startupDelay specifies how long to wait before starting the operation.
+  # Applies to both startup (when startupPolicy triggers) and manual operations.
+  # Useful for staggering multiple namespace resume operations to prevent
+  # simultaneous resume bursts that could overload nodes.
+  # Default: 0s (no delay)
+  # Example: Use different delays for different namespaces:
+  #   namespace-1: startupDelay: 0s    (starts immediately)
+  #   namespace-2: startupDelay: 30s   (waits 30 seconds)
+  #   namespace-3: startupDelay: 60s   (waits 60 seconds)
+  # startupDelay: 0s
 
-  # balanceWindowSeconds defines how long (in seconds) after resume tsimdihe operator
-  # will automatically trigger rolling restarts. Only used if balancePods is true.
-  # Default: 600 (10 minutes). Range: 0-3600
-  # balanceWindowSeconds: 600
-
-  # terminationGracePeriodSeconds defines graceful shutdown overrides for different resource types
-  # during the Freeze operation. Original values are restored during Resume.
-  # Range: 0-300 seconds.
-  # terminationGracePeriodSeconds:
-  #   deployment: 10
-  #   statefulSet: 60
-
-  # startupNodeReadinessPolicy defines node readiness requirements before applying startup policy.
-  # Only applies when startupPolicy is Resume or Freeze.
-  # This helps ensure pods are distributed across all available nodes when operator starts.
-  # startupNodeReadinessPolicy:
-  #   enabled: true
-  #   timeoutSeconds: 120          # Wait max 2 minutes for nodes
-  #   requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
-  #   minReadyNodes: 2             # Only used when requireAllNodes: false
-  #   nodeSelector:
-  #     node-role.kubernetes.io/worker: ""
+  # ============================================================================
+  # WORKLOAD SELECTION
+  # ============================================================================
 
   # selector is optional - if not specified, all Deployments and StatefulSets will be affected
   # selector:
@@ -64,3 +56,103 @@ spec:
   #     values:
   #     - frontend
   #     - backend
+
+  # ============================================================================
+  # POD BALANCING (Resume only)
+  # ============================================================================
+
+  # balancePods enables automatic pod redistribution when new nodes become Ready
+  # after a Resume operation. Only applies when action is Resume.
+  # balancePods: true
+
+  # balanceWindowSeconds defines how long (in seconds) after resume the operator
+  # will automatically trigger rolling restarts. Only used if balancePods is true.
+  # Default: 600 (10 minutes). Range: 0-3600
+  # balanceWindowSeconds: 600
+
+  # ============================================================================
+  # GRACEFUL SHUTDOWN (Freeze only)
+  # ============================================================================
+
+  # terminationGracePeriodSeconds defines graceful shutdown overrides for different resource types
+  # during the Freeze operation. Original values are restored during Resume.
+  # Range: 0-300 seconds.
+  # terminationGracePeriodSeconds:
+  #   deployment: 10
+  #   statefulSet: 60
+
+  # ============================================================================
+  # NODE READINESS POLICY
+  # ============================================================================
+
+  # startupNodeReadinessPolicy defines node readiness requirements before applying startup policy.
+  # Only applies when startupPolicy is Resume or Freeze.
+  # This helps ensure pods are distributed across all available nodes when operator starts.
+  # startupNodeReadinessPolicy:
+  #   enabled: true
+  #   timeoutSeconds: 120          # Wait max 2 minutes for nodes
+  #   requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
+  #   minReadyNodes: 2             # Only used when requireAllNodes: false
+  #   nodeSelector:
+  #     node-role.kubernetes.io/worker: ""
+
+  # ============================================================================
+  # ADAPTIVE THROTTLING (Resume only)
+  # ============================================================================
+
+  # adaptiveThrottling enables CPU-aware, adaptive batched resume to prevent node overload.
+  # The operator monitors 3 levels of signals and adjusts resume speed accordingly:
+  #   🔴 Signal 1: Node NotReady (Critical) - STOP all resume operations and wait
+  #   🟡 Signal 2: Node Pressure (Warning)  - Significantly reduce batch size (default: 50%)
+  #   🟠 Signal 3: Pending Pods (Info)      - Moderately reduce batch size (default: 70%)
+  #
+  # Use this when you have:
+  #   - Limited node resources (small clusters)
+  #   - Many workloads to resume simultaneously
+  #   - Risk of node crashes during resume operations
+  #
+  # adaptiveThrottling:
+  #   enabled: true
+  #
+  #   # Initial batch size - start with this many workloads at a time
+  #   # Default: 3, Min: 1, Max: 20
+  #   initialBatchSize: 3
+  #
+  #   # Minimum batch size - never go below this when slowing down
+  #   # Default: 1, Min: 1
+  #   minBatchSize: 1
+  #
+  #   # Wait interval between batches (in seconds)
+  #   # Default: 5, Min: 0, Max: 60
+  #   batchInterval: 5
+  #
+  #   # Signal monitoring configuration
+  #   signalChecks:
+  #     # Signal 1: Node Ready Status (🔴 Critical - STOP)
+  #     checkNodeReady:
+  #       enabled: true
+  #       waitInterval: 20    # Check every 20 seconds when waiting
+  #       maxWaitTime: 1800   # Wait max 30 minutes (1800 seconds)
+  #
+  #     # Signal 2: Node Pressure (🟡 Warning - SLOW DOWN)
+  #     checkNodePressure:
+  #       enabled: true
+  #       pressureTypes:
+  #         - MemoryPressure
+  #         - DiskPressure
+  #         - PIDPressure
+  #         - NetworkUnavailable
+  #       slowdownPercent: 50  # Reduce batch size to 50% when pressure detected
+  #
+  #     # Signal 3: Pending Pods (🟠 Info - SLOW DOWN)
+  #     checkPendingPods:
+  #       enabled: true
+  #       threshold: 5          # Trigger if more than 5 pods are pending
+  #       slowdownPercent: 70   # Reduce batch size to 70% when triggered
+  #
+  #   # Which nodes to monitor
+  #   nodeSelector:
+  #     node-role.kubernetes.io/worker: ""
+  #
+  #   # Fallback behavior if signals cannot be collected
+  #   fallbackOnMetricsUnavailable: true

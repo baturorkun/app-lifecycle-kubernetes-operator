@@ -150,6 +150,21 @@ type NamespaceLifecyclePolicySpec struct {
 	// applying startup policy. Only applies when startupPolicy is Resume or Freeze.
 	// +optional
 	StartupNodeReadinessPolicy *StartupNodeReadinessPolicy `json:"startupNodeReadinessPolicy,omitempty"`
+
+	// startupDelay specifies how long to wait before starting the operation.
+	// Applies to both startup (when startupPolicy triggers) and manual operations.
+	// Useful for staggering multiple namespace resume operations to prevent
+	// simultaneous resume bursts that could overload nodes.
+	// Default: 0s (no delay)
+	// +optional
+	// +kubebuilder:default="0s"
+	StartupDelay metav1.Duration `json:"startupDelay,omitempty"`
+
+	// adaptiveThrottling enables adaptive throttling during Resume operations
+	// to prevent node overload by monitoring node conditions and pending pods.
+	// Only applies when action is Resume.
+	// +optional
+	AdaptiveThrottling *AdaptiveThrottlingConfig `json:"adaptiveThrottling,omitempty"`
 }
 
 // TerminationGracePeriodConfig defines terminationGracePeriodSeconds for different resource types.
@@ -201,6 +216,135 @@ type StartupNodeReadinessPolicy struct {
 	// Default: {"node-role.kubernetes.io/worker": ""}
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+}
+
+// AdaptiveThrottlingConfig defines adaptive throttling configuration for Resume operations
+type AdaptiveThrottlingConfig struct {
+	// enabled activates adaptive throttling during Resume operations
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// initialBatchSize is the starting number of workloads to resume in each batch
+	// Default: 3
+	// +optional
+	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	InitialBatchSize int32 `json:"initialBatchSize,omitempty"`
+
+	// minBatchSize is the minimum batch size when throttling
+	// Default: 1
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	MinBatchSize int32 `json:"minBatchSize,omitempty"`
+
+	// batchInterval is the wait time between batches in seconds
+	// Default: 5
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=60
+	BatchInterval int32 `json:"batchInterval,omitempty"`
+
+	// signalChecks defines which signals to monitor and how to respond
+	// +optional
+	SignalChecks *SignalChecksConfig `json:"signalChecks,omitempty"`
+
+	// nodeSelector selects which nodes to monitor for signals
+	// Default: {"node-role.kubernetes.io/worker": ""}
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// fallbackOnMetricsUnavailable when true, continues resume without throttling
+	// if node metrics or signals cannot be collected
+	// Default: true
+	// +optional
+	// +kubebuilder:default=true
+	FallbackOnMetricsUnavailable bool `json:"fallbackOnMetricsUnavailable,omitempty"`
+}
+
+// SignalChecksConfig defines signal monitoring configuration
+type SignalChecksConfig struct {
+	// checkNodeReady enables monitoring of node Ready status
+	// +optional
+	CheckNodeReady *NodeReadyCheckConfig `json:"checkNodeReady,omitempty"`
+
+	// checkNodePressure enables monitoring of node pressure conditions
+	// +optional
+	CheckNodePressure *NodePressureCheckConfig `json:"checkNodePressure,omitempty"`
+
+	// checkPendingPods enables monitoring of pending pods
+	// +optional
+	CheckPendingPods *PendingPodsCheckConfig `json:"checkPendingPods,omitempty"`
+}
+
+// NodeReadyCheckConfig defines configuration for node Ready status monitoring
+type NodeReadyCheckConfig struct {
+	// enabled activates node Ready status checking
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// waitInterval is how often to check node status when waiting (in seconds)
+	// Default: 20
+	// +optional
+	// +kubebuilder:default=20
+	// +kubebuilder:validation:Minimum=5
+	// +kubebuilder:validation:Maximum=300
+	WaitInterval int32 `json:"waitInterval,omitempty"`
+
+	// maxWaitTime is the maximum time to wait for nodes to become ready (in seconds)
+	// Default: 1800 (30 minutes)
+	// +optional
+	// +kubebuilder:default=1800
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=7200
+	MaxWaitTime int32 `json:"maxWaitTime,omitempty"`
+}
+
+// NodePressureCheckConfig defines configuration for node pressure monitoring
+type NodePressureCheckConfig struct {
+	// enabled activates node pressure checking
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// pressureTypes lists which pressure conditions to monitor
+	// Valid values: MemoryPressure, DiskPressure, PIDPressure, NetworkUnavailable
+	// +optional
+	PressureTypes []string `json:"pressureTypes,omitempty"`
+
+	// slowdownPercent is the percentage of initial batch size to use when pressure detected
+	// For example, 50 means reduce batch size to 50% of initial value
+	// Default: 50
+	// +optional
+	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=100
+	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
+}
+
+// PendingPodsCheckConfig defines configuration for pending pods monitoring
+type PendingPodsCheckConfig struct {
+	// enabled activates pending pods checking
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// threshold is the number of pending pods that triggers throttling
+	// Default: 5
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	Threshold int32 `json:"threshold,omitempty"`
+
+	// slowdownPercent is the percentage of current batch size to use when pending pods exceed threshold
+	// For example, 70 means reduce batch size to 70% of current value
+	// Default: 70
+	// +optional
+	// +kubebuilder:default=70
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=100
+	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
 }
 
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
@@ -256,6 +400,11 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	StartupReadyNodes *int32 `json:"startupReadyNodes,omitempty"`
 
+	// adaptiveProgress tracks progress of adaptive throttling during Resume operations
+	// Only populated when adaptiveThrottling is enabled
+	// +optional
+	AdaptiveProgress *AdaptiveProgressStatus `json:"adaptiveProgress,omitempty"`
+
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -269,6 +418,90 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// AdaptiveProgressStatus tracks the progress of adaptive throttling during Resume
+type AdaptiveProgressStatus struct {
+	// totalWorkloads is the total number of workloads to resume
+	// +optional
+	TotalWorkloads int32 `json:"totalWorkloads,omitempty"`
+
+	// resumedWorkloads is the number of workloads successfully resumed so far
+	// +optional
+	ResumedWorkloads int32 `json:"resumedWorkloads,omitempty"`
+
+	// currentBatchSize is the current batch size being used (dynamically adjusted)
+	// +optional
+	CurrentBatchSize int32 `json:"currentBatchSize,omitempty"`
+
+	// activeSignals lists the currently active signals affecting throttling
+	// +optional
+	ActiveSignals []Signal `json:"activeSignals,omitempty"`
+
+	// lastCheckTime is when signals were last checked
+	// +optional
+	LastCheckTime *metav1.Time `json:"lastCheckTime,omitempty"`
+
+	// message provides human-readable progress information
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// SignalType defines the type of signal detected
+// +kubebuilder:validation:Enum=NodeNotReady;NodePressure;PendingPods
+type SignalType string
+
+const (
+	// SignalNodeNotReady indicates one or more nodes are NotReady
+	SignalNodeNotReady SignalType = "NodeNotReady"
+
+	// SignalNodePressure indicates node pressure conditions detected
+	SignalNodePressure SignalType = "NodePressure"
+
+	// SignalPendingPods indicates too many pods are pending
+	SignalPendingPods SignalType = "PendingPods"
+)
+
+// SignalSeverity defines the severity level of a signal
+// +kubebuilder:validation:Enum=Critical;Warning;Info
+type SignalSeverity string
+
+const (
+	// SignalSeverityCritical indicates resume should stop
+	SignalSeverityCritical SignalSeverity = "Critical"
+
+	// SignalSeverityWarning indicates resume should slow down significantly
+	SignalSeverityWarning SignalSeverity = "Warning"
+
+	// SignalSeverityInfo indicates resume should slow down slightly
+	SignalSeverityInfo SignalSeverity = "Info"
+)
+
+// Signal represents a detected condition that affects throttling
+type Signal struct {
+	// type is the type of signal
+	// +optional
+	Type SignalType `json:"type,omitempty"`
+
+	// severity indicates how critical the signal is
+	// +optional
+	Severity SignalSeverity `json:"severity,omitempty"`
+
+	// node is the name of the affected node (for node-related signals)
+	// +optional
+	Node string `json:"node,omitempty"`
+
+	// condition is the specific condition type (for pressure signals)
+	// +optional
+	Condition string `json:"condition,omitempty"`
+
+	// count is a numeric value associated with the signal (e.g., pending pod count)
+	// +optional
+	Count int32 `json:"count,omitempty"`
+
+	// message provides human-readable details about the signal
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
