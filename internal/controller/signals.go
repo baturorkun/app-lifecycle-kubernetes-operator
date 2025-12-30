@@ -212,13 +212,3 @@ func hasSignal(signals []appsv1alpha1.Signal, signalType appsv1alpha1.SignalType
 	}
 	return false
 }
-
-// hasSignalWithSeverity checks if a signal with specific type and severity exists
-func hasSignalWithSeverity(signals []appsv1alpha1.Signal, signalType appsv1alpha1.SignalType, severity appsv1alpha1.SignalSeverity) bool {
-	for _, signal := range signals {
-		if signal.Type == signalType && signal.Severity == severity {
-			return true
-		}
-	}
-	return false
-}

@@ -383,11 +383,3 @@ func min(a, b int32) int32 {
 	}
 	return b
 }
-
-// max returns the maximum of two int32 values
-func max(a, b int32) int32 {
-	if a > b {
-		return a
-	}
-	return b
-}

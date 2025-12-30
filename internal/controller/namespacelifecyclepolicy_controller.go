@@ -47,6 +47,11 @@ type NamespaceLifecyclePolicyReconciler struct {
 	Scheme *runtime.Scheme
 }
 
+const (
+	// nilAnnotationValue is used when original terminationGracePeriodSeconds is nil
+	nilAnnotationValue = "nil"
+)
+
 // +kubebuilder:rbac:groups=apps.ops.dev,resources=namespacelifecyclepolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.ops.dev,resources=namespacelifecyclepolicies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.ops.dev,resources=namespacelifecyclepolicies/finalizers,verbs=update
@@ -136,7 +141,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 		if deployment.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
 		} else {
-			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = "nil"
+			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
 		}
 		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.Deployment
 	}
@@ -172,7 +177,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 		if sts.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*sts.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
 		} else {
-			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = "nil"
+			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
 		}
 		sts.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.StatefulSet
 	}
@@ -209,7 +214,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 
 	// Restore original terminationGracePeriodSeconds if exists
 	if originalGraceStr, ok := deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
-		if originalGraceStr == "nil" {
+		if originalGraceStr == nilAnnotationValue {
 			deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
 		} else {
 			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
@@ -251,7 +256,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 
 	// Restore original terminationGracePeriodSeconds if exists
 	if originalGraceStr, ok := sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
-		if originalGraceStr == "nil" {
+		if originalGraceStr == nilAnnotationValue {
 			sts.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
 		} else {
 			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
@@ -917,7 +922,7 @@ func (r *NamespaceLifecyclePolicyReconciler) countTotalWorkerNodes(ctx context.C
 	log := logf.FromContext(ctx)
 
 	// Default selector if not specified
-	if nodeSelector == nil || len(nodeSelector) == 0 {
+	if len(nodeSelector) == 0 {
 		nodeSelector = map[string]string{
 			"node-role.kubernetes.io/worker": "",
 		}
@@ -954,7 +959,7 @@ func (r *NamespaceLifecyclePolicyReconciler) countReadyWorkerNodes(ctx context.C
 	log := logf.FromContext(ctx)
 
 	// Default selector if not specified
-	if nodeSelector == nil || len(nodeSelector) == 0 {
+	if len(nodeSelector) == 0 {
 		nodeSelector = map[string]string{
 			"node-role.kubernetes.io/worker": "",
 		}
