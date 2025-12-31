@@ -101,10 +101,11 @@ spec:
   # ============================================================================
 
   # adaptiveThrottling enables CPU-aware, adaptive batched resume to prevent node overload.
-  # The operator monitors 3 levels of signals and adjusts resume speed accordingly:
-  #   🔴 Signal 1: Node NotReady (Critical) - STOP all resume operations and wait
-  #   🟡 Signal 2: Node Pressure (Warning)  - Significantly reduce batch size (default: 50%)
-  #   🟠 Signal 3: Pending Pods (Info)      - Moderately reduce batch size (default: 70%)
+  # The operator monitors 4 levels of signals and adjusts resume speed accordingly:
+  #   🔴 Signal 1: Node NotReady (Critical)        - STOP all resume operations and wait
+  #   🟡 Signal 2: Node Pressure (Warning)         - Significantly reduce batch size (default: 50%)
+  #   🟢 Signal 3: Node Resource Allocation (Warning) - PROACTIVE reduction before pressure (default: 60%)
+  #   🟠 Signal 4: Pending Pods (Info)             - Moderately reduce batch size (default: 70%)
   #
   # Use this when you have:
   #   - Limited node resources (small clusters)
@@ -135,6 +136,7 @@ spec:
   #       maxWaitTime: 1800   # Wait max 30 minutes (1800 seconds)
   #
   #     # Signal 2: Node Pressure (🟡 Warning - SLOW DOWN)
+  #     # Monitors node conditions: MemoryPressure, DiskPressure, PIDPressure
   #     checkNodePressure:
   #       enabled: true
   #       pressureTypes:
@@ -144,10 +146,24 @@ spec:
   #         - NetworkUnavailable
   #       slowdownPercent: 50  # Reduce batch size to 50% when pressure detected
   #
-  #     # Signal 3: Pending Pods (🟠 Info - SLOW DOWN)
+  #     # Signal 3: Node Usage (🟢 Warning - PROACTIVE SLOW DOWN)
+  #     # PROACTIVE monitoring - detects high resource usage BEFORE nodes become unresponsive
+  #     # Monitors: (actual node CPU/memory usage from kubelet / node allocatable) * 100
+  #     # Uses kubelet stats API for real-time usage (~10 second lag)
+  #     # This prevents nodes from going NotReady by throttling early
+  #     checkNodeUsage:
+  #       enabled: true
+  #       cpuThresholdPercent: 80     # Trigger when any node reaches 80% CPU usage
+  #       memoryThresholdPercent: 80  # Trigger when any node reaches 80% memory usage
+  #       slowdownPercent: 60         # Reduce batch size to 60% when triggered
+  #
+  #     # Signal 4: Pending Pods (🟠 Info - SLOW DOWN)
+  #     # CLUSTER-WIDE: Counts resource-constrained pending pods across ALL namespaces
+  #     # Only counts pods pending due to RESOURCE CONSTRAINTS (Insufficient cpu/memory/pods)
+  #     # Does NOT count pods pending for other reasons (ImagePullBackOff, ContainerCreating, etc.)
   #     checkPendingPods:
   #       enabled: true
-  #       threshold: 5          # Trigger if more than 5 pods are pending
+  #       threshold: 5          # Trigger if more than 5 pods are resource-pending cluster-wide
   #       slowdownPercent: 70   # Reduce batch size to 70% when triggered
   #
   #   # Which nodes to monitor

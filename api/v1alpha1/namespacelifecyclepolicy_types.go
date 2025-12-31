@@ -278,6 +278,12 @@ type SignalChecksConfig struct {
 	// checkPendingPods enables monitoring of pending pods
 	// +optional
 	CheckPendingPods *PendingPodsCheckConfig `json:"checkPendingPods,omitempty"`
+
+	// checkNodeUsage enables proactive monitoring of real-time node resource usage
+	// Monitors actual CPU/memory usage from kubelet stats API (~10s lag)
+	// This signal fires when nodes reach high usage, allowing preventative throttling
+	// +optional
+	CheckNodeUsage *NodeUsageCheckConfig `json:"checkNodeUsage,omitempty"`
 }
 
 // NodeReadyCheckConfig defines configuration for node Ready status monitoring
@@ -343,6 +349,42 @@ type PendingPodsCheckConfig struct {
 	// Default: 70
 	// +optional
 	// +kubebuilder:default=70
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=100
+	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
+}
+
+// NodeUsageCheckConfig defines configuration for proactive real-time node usage monitoring
+// This check monitors actual CPU/memory usage from kubelet stats API (~10s lag)
+// to detect high resource usage BEFORE nodes become unresponsive
+type NodeUsageCheckConfig struct {
+	// enabled activates node usage checking
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// cpuThresholdPercent is the CPU usage percentage that triggers throttling
+	// When any node's actual CPU usage exceeds this threshold, throttling is activated
+	// Default: 80 (triggers at 80% CPU usage)
+	// +optional
+	// +kubebuilder:default=80
+	// +kubebuilder:validation:Minimum=50
+	// +kubebuilder:validation:Maximum=100
+	CPUThresholdPercent int32 `json:"cpuThresholdPercent,omitempty"`
+
+	// memoryThresholdPercent is the memory usage percentage that triggers throttling
+	// When any node's actual memory usage exceeds this threshold, throttling is activated
+	// Default: 80 (triggers at 80% memory usage)
+	// +optional
+	// +kubebuilder:default=80
+	// +kubebuilder:validation:Minimum=50
+	// +kubebuilder:validation:Maximum=100
+	MemoryThresholdPercent int32 `json:"memoryThresholdPercent,omitempty"`
+
+	// slowdownPercent is the percentage of initial batch size to use when threshold exceeded
+	// For example, 60 means reduce batch size to 60% of initial value
+	// Default: 60
+	// +optional
+	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=100
 	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
@@ -449,7 +491,7 @@ type AdaptiveProgressStatus struct {
 }
 
 // SignalType defines the type of signal detected
-// +kubebuilder:validation:Enum=NodeNotReady;NodePressure;PendingPods
+// +kubebuilder:validation:Enum=NodeNotReady;NodePressure;PendingPods;NodeUsage
 type SignalType string
 
 const (
@@ -461,6 +503,10 @@ const (
 
 	// SignalPendingPods indicates too many pods are pending
 	SignalPendingPods SignalType = "PendingPods"
+
+	// SignalNodeUsage indicates nodes are experiencing high resource usage
+	// This is a proactive signal based on real-time kubelet metrics
+	SignalNodeUsage SignalType = "NodeUsage"
 )
 
 // SignalSeverity defines the severity level of a signal

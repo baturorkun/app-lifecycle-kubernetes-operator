@@ -95,8 +95,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 	// Process workloads in adaptive batches
 	for resumedCount < totalWorkloads {
-		// 1. Collect signals
-		signals, err := r.collectSignals(ctx, config, policy.Spec.TargetNamespace)
+		// 1. Collect signals (cluster-wide)
+		signals, err := r.collectSignals(ctx, config)
 		if err != nil {
 			if config.FallbackOnMetricsUnavailable {
 				log.Error(err, "Failed to collect signals, proceeding without throttling")
@@ -224,6 +224,21 @@ func (r *NamespaceLifecyclePolicyReconciler) calculateBatchSize(
 		return newSize
 	}
 
+	// Check for NodeUsage (Warning severity - PROACTIVE)
+	// This signal fires when node actual usage exceeds threshold (default 80%)
+	// Uses real-time kubelet metrics, more proactive than NodePressure
+	if hasSignal(signals, appsv1alpha1.SignalNodeUsage) && config.SignalChecks.CheckNodeUsage != nil {
+		slowdownPercent := config.SignalChecks.CheckNodeUsage.SlowdownPercent
+		if slowdownPercent == 0 {
+			slowdownPercent = 60 // default to 60%
+		}
+		newSize := (initialBatchSize * slowdownPercent) / 100
+		if newSize < minBatchSize {
+			newSize = minBatchSize
+		}
+		return newSize
+	}
+
 	// Check for PendingPods (Info severity)
 	if hasSignal(signals, appsv1alpha1.SignalPendingPods) && config.SignalChecks.CheckPendingPods != nil {
 		slowdownPercent := config.SignalChecks.CheckPendingPods.SlowdownPercent
@@ -297,8 +312,8 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForSignalClear(
 			log.Info("Context cancelled while waiting for signal to clear")
 			return false
 		case <-ticker.C:
-			// Check if signal has cleared
-			signals, err := r.collectSignals(ctx, config, policy.Spec.TargetNamespace)
+			// Check if signal has cleared (cluster-wide)
+			signals, err := r.collectSignals(ctx, config)
 			if err != nil {
 				if config.FallbackOnMetricsUnavailable {
 					log.Error(err, "Failed to collect signals during wait, assuming cleared")

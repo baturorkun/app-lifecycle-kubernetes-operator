@@ -156,6 +156,46 @@ spec:
                             minimum: 5
                             type: integer
                         type: object
+                      checkNodeUsage:
+                        description: |-
+                          checkNodeUsage enables proactive monitoring of real-time node resource usage
+                          Monitors actual CPU/memory usage from kubelet stats API (~10s lag)
+                          This signal fires when nodes reach high usage, allowing preventative throttling
+                        properties:
+                          cpuThresholdPercent:
+                            default: 80
+                            description: |-
+                              cpuThresholdPercent is the CPU usage percentage that triggers throttling
+                              When any node's actual CPU usage exceeds this threshold, throttling is activated
+                              Default: 80 (triggers at 80% CPU usage)
+                            format: int32
+                            maximum: 100
+                            minimum: 50
+                            type: integer
+                          enabled:
+                            description: enabled activates node usage checking
+                            type: boolean
+                          memoryThresholdPercent:
+                            default: 80
+                            description: |-
+                              memoryThresholdPercent is the memory usage percentage that triggers throttling
+                              When any node's actual memory usage exceeds this threshold, throttling is activated
+                              Default: 80 (triggers at 80% memory usage)
+                            format: int32
+                            maximum: 100
+                            minimum: 50
+                            type: integer
+                          slowdownPercent:
+                            default: 60
+                            description: |-
+                              slowdownPercent is the percentage of initial batch size to use when threshold exceeded
+                              For example, 60 means reduce batch size to 60% of initial value
+                              Default: 60
+                            format: int32
+                            maximum: 100
+                            minimum: 10
+                            type: integer
+                        type: object
                       checkPendingPods:
                         description: checkPendingPods enables monitoring of pending
                           pods
@@ -405,6 +445,7 @@ spec:
                           - NodeNotReady
                           - NodePressure
                           - PendingPods
+                          - NodeUsage
                           type: string
                       type: object
                     type: array
