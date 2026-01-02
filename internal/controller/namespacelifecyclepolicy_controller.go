@@ -400,13 +400,24 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			return err
 		}
 
-		// Update status to show we're waiting
-		policy.Status.Phase = appsv1alpha1.PhaseIdle
-		policy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.ResumeDelay.Duration)
-		policy.Status.LastStartupAt = &now
-		policy.Status.LastStartupAction = "RESUME_DELAYED"
-		if err := r.Status().Update(ctx, policy); err != nil {
+		// Update status with retry to handle concurrent updates
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			// Fetch latest version to avoid conflict errors
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+
+			// Update status to show we're waiting
+			latestPolicy.Status.Phase = appsv1alpha1.PhaseIdle
+			latestPolicy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.ResumeDelay.Duration)
+			latestPolicy.Status.LastStartupAt = &now
+			latestPolicy.Status.LastStartupAction = "RESUME_DELAYED"
+
+			return r.Status().Update(ctx, latestPolicy)
+		}); err != nil {
 			log.Error(err, "Failed to update status for delayed startup resume")
+			// Don't return error - the annotation is already set, reconcile loop will handle it
 		}
 
 		// Return success - Reconcile loop will handle the actual resume after delay
@@ -1457,7 +1468,39 @@ func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestartSts(ctx contex
 // SetupWithManager sets up the controller with the Manager.
 func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1alpha1.NamespaceLifecyclePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&appsv1alpha1.NamespaceLifecyclePolicy{}, builder.WithPredicates(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				// Trigger on generation changes (spec updates)
+				if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+					return true
+				}
+
+				// Also trigger when pending-startup-resume annotation is added or changed
+				oldAnnotations := e.ObjectOld.GetAnnotations()
+				newAnnotations := e.ObjectNew.GetAnnotations()
+
+				oldPending := oldAnnotations["apps.ops.dev/pending-startup-resume"]
+				newPending := newAnnotations["apps.ops.dev/pending-startup-resume"]
+
+				// Trigger if pending annotation was added or changed to "true"
+				if oldPending != newPending && newPending == "true" {
+					return true
+				}
+
+				return false
+			},
+			CreateFunc: func(e event.CreateEvent) bool {
+				// Always reconcile on create
+				return true
+			},
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				// Trigger on delete
+				return true
+			},
+			GenericFunc: func(e event.GenericEvent) bool {
+				return false
+			},
+		})).
 		Watches(
 			&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(r.mapNodeReadyToPolicy),

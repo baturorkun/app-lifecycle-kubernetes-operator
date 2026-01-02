@@ -58,7 +58,7 @@ echo "====================================="
 
 # === CREATE NAMESPACE ===
 
-echo ""
+echo "***"
 echo "Creating namespace: $NS"
 kubectl create namespace "$NS" 2>/dev/null || echo "Namespace $NS already exists"
 
