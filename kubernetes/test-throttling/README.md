@@ -9,4 +9,6 @@ IMAGE=nginx REPLICAS=1 NUMBER=10 TYPE=deployment ./kubernetes/test-create-deploy
 
 # Delete All CRs
 kubectl delete namespacelifecyclepolicy --all
-make 
+
+# Run
+NAMESPACES="test1-ns test2-ns test3-ns test4-ns test5-ns test6-ns test7-ns" ./create-throttling-policies.sh
