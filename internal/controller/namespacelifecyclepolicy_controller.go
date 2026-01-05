@@ -278,7 +278,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 }
 
 // updateStatus updates the policy status with phase, message and lastHandledOperationId
-func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string) error {
+func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string, isStartupOperation bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Fetch latest version to avoid optimistic locking errors (the object has been modified)
 		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
@@ -289,9 +289,11 @@ func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, p
 		latestPolicy.Status.Phase = phase
 		latestPolicy.Status.Message = message
 
-		// Map the Spec from the original policy object to the latest (in case OpId match is needed)
-		// But sticking to the OpId from the original request context
-		latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
+		// Only update LastHandledOperationId for user-initiated operations
+		// Startup operations should not update this field to avoid blocking subsequent operations
+		if !isStartupOperation {
+			latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
+		}
 
 		return r.Status().Update(ctx, latestPolicy)
 	})
@@ -616,7 +618,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 					"conflictsWith", p.Name,
 					"reason", "Namespace already managed by another policy")
 
-				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, msg); err != nil {
+				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, msg, false); err != nil {
 					log.Error(err, "Failed to update status for duplicate policy")
 					return ctrl.Result{}, err
 				}
@@ -785,7 +787,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 				// Update status to show we're delaying
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseIdle,
-					fmt.Sprintf("Waiting %s before starting Resume operation", policy.Spec.ResumeDelay.Duration)); err != nil {
+					fmt.Sprintf("Waiting %s before starting Resume operation", policy.Spec.ResumeDelay.Duration), false); err != nil {
 					log.Error(err, "Failed to update status for delay")
 				}
 
@@ -882,7 +884,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 			// Update status without setting lastHandledOperationId (allow retry when namespace is created)
 			// DO NOT set LastHandledOperationId - we want to retry when namespace is created
-			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg); err != nil {
+			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg, false); err != nil {
 				log.Error(err, "Failed to update status")
 				return ctrl.Result{}, err
 			}
@@ -894,7 +896,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Other error (permissions, api server down, etc) - this should be retried
 		log.Error(err, "Failed to get target namespace")
 
-		if statusErr := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, fmt.Sprintf("Failed to get namespace: %v", err)); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, fmt.Sprintf("Failed to get namespace: %v", err), false); statusErr != nil {
 			log.Error(statusErr, "Failed to update status")
 		}
 
@@ -911,7 +913,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		phase = appsv1alpha1.PhaseResuming
 	}
 
-	if err := r.updateStatus(ctx, &policy, phase, "Processing request"); err != nil {
+	if err := r.updateStatus(ctx, &policy, phase, "Processing request", false); err != nil {
 		log.Error(err, "Failed to update status to processing")
 		return ctrl.Result{}, err
 	}
@@ -921,7 +923,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if err != nil {
 		log.Error(err, "Failed to list deployments")
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-			fmt.Sprintf("Failed to list deployments: %v", err)); err != nil {
+			fmt.Sprintf("Failed to list deployments: %v", err), false); err != nil {
 			log.Error(err, "Failed to update status")
 		}
 		return ctrl.Result{}, err
@@ -932,7 +934,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if err != nil {
 		log.Error(err, "Failed to list statefulsets")
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-			fmt.Sprintf("Failed to list statefulsets: %v", err)); err != nil {
+			fmt.Sprintf("Failed to list statefulsets: %v", err), false); err != nil {
 			log.Error(err, "Failed to update status")
 		}
 		return ctrl.Result{}, err
@@ -959,7 +961,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		if policy.Spec.Action == appsv1alpha1.LifecycleActionResume {
 			phase = appsv1alpha1.PhaseResumed
 		}
-		if err := r.updateStatus(ctx, &policy, phase, msg); err != nil {
+		if err := r.updateStatus(ctx, &policy, phase, msg, false); err != nil {
 			log.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}
@@ -978,7 +980,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			if err := r.freezeDeployment(ctx, deployment, &policy); err != nil {
 				log.Error(err, "Failed to freeze deployment", "name", deployment.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to freeze deployment %s: %v", deployment.Name, err)); err != nil {
+					fmt.Sprintf("Failed to freeze deployment %s: %v", deployment.Name, err), false); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -992,7 +994,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			if err := r.freezeStatefulSet(ctx, sts, &policy); err != nil {
 				log.Error(err, "Failed to freeze statefulset", "name", sts.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to freeze statefulset %s: %v", sts.Name, err)); err != nil {
+					fmt.Sprintf("Failed to freeze statefulset %s: %v", sts.Name, err), false); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -1002,7 +1004,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Update status to frozen
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFrozen,
 			fmt.Sprintf("Successfully froze %d deployments and %d statefulsets",
-				len(deployments.Items), len(statefulSets.Items))); err != nil {
+				len(deployments.Items), len(statefulSets.Items)), false); err != nil {
 			log.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}
@@ -1019,7 +1021,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
 				log.Error(err, "Failed to resume with adaptive throttling")
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to resume: %v", err)); err != nil {
+					fmt.Sprintf("Failed to resume: %v", err), false); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -1037,7 +1039,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				if err := r.resumeDeployment(ctx, deployment); err != nil {
 					log.Error(err, "Failed to resume deployment", "name", deployment.Name)
 					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err)); err != nil {
+						fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err), false); err != nil {
 						log.Error(err, "Failed to update status")
 					}
 					return ctrl.Result{}, err
@@ -1051,7 +1053,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				if err := r.resumeStatefulSet(ctx, sts); err != nil {
 					log.Error(err, "Failed to resume statefulset", "name", sts.Name)
 					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err)); err != nil {
+						fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err), false); err != nil {
 						log.Error(err, "Failed to update status")
 					}
 					return ctrl.Result{}, err
