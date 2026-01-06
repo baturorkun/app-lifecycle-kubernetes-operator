@@ -1477,15 +1477,13 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 					return true
 				}
 
-				// Also trigger when pending-startup-resume annotation is added or changed
-				oldAnnotations := e.ObjectOld.GetAnnotations()
+				// Also trigger when pending-startup-resume annotation is present
 				newAnnotations := e.ObjectNew.GetAnnotations()
-
-				oldPending := oldAnnotations["apps.ops.dev/pending-startup-resume"]
 				newPending := newAnnotations["apps.ops.dev/pending-startup-resume"]
 
-				// Trigger if pending annotation was added or changed to "true"
-				if oldPending != newPending && newPending == "true" {
+				// Trigger if pending annotation is "true" (regardless of whether it changed)
+				// This ensures reconcile runs after operator restarts to restore lost timers
+				if newPending == "true" {
 					return true
 				}
 
