@@ -91,7 +91,7 @@ spec:
     minBatchSize: 1
 
     # Wait 5 seconds between batches
-    batchInterval: 5
+    batchInterval: 3
 
     # Signal monitoring
     signalChecks:

@@ -398,28 +398,15 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		return nil
 	}
 
-	// Check if already in desired phase
-	if policy.Status.Phase == desiredPhase {
-		if desiredPhase == appsv1alpha1.PhaseFrozen {
-			policy.Status.LastStartupAction = "NO_ACTION_ALREADY_FROZEN"
-		} else {
-			policy.Status.LastStartupAction = "NO_ACTION_ALREADY_RESUMED"
-		}
-		if err := r.Status().Update(ctx, policy); err != nil {
-			log.Error(err, "Failed to update status")
-		}
-		log.Info("Startup policy check: no action needed",
-			"policy", policy.Name,
-			"startupPolicy", policy.Spec.StartupPolicy,
-			"currentPhase", policy.Status.Phase,
-			"reason", "Already in desired state")
-		return nil
-	}
+	// NOTE: We do NOT check if Phase == desiredPhase and skip
+	// Reason: Phase can be stale (from before operator restart)
+	// Better to always apply startup policy - the freeze/resume functions are idempotent anyway
+	// They will skip if workloads are already in the desired state
 
 	// Apply resumeDelay if this is a Resume startup action
 	// Set status fields instead of annotations - cleaner and follows Kubernetes best practices
 	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.ResumeDelay.Duration > 0 {
-		log.Info("Resume delay configured for startup policy - setting status for Reconcile loop",
+		log.Info("⏱️ Resume delay configured for startup policy - setting status for Reconcile loop",
 			"delay", policy.Spec.ResumeDelay.Duration,
 			"targetNamespace", policy.Spec.TargetNamespace)
 
@@ -444,6 +431,8 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			log.Error(err, "Failed to update status for delayed startup resume")
 			return err
 		}
+
+		log.Info("✅ Status updated successfully: PendingStartupResume=true", "policy", policy.Name)
 
 		// Return success - Reconcile loop will handle the actual resume after delay
 		return nil
@@ -506,15 +495,13 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 		policy.Status.Phase = appsv1alpha1.PhaseFrozen
 		policy.Status.LastStartupAction = "FREEZE_APPLIED"
-		// Mark this operationId as handled to prevent duplicate processing
-		if policy.Spec.OperationId != "" {
-			policy.Status.LastHandledOperationId = policy.Spec.OperationId
-		}
-		log.Info("Startup policy applied: frozen", "policy", policy.Name)
+		// NOTE: Do NOT set LastHandledOperationId here!
+		// Startup policy is independent of manual operations (spec.action/operationId)
+		log.Info("⏸️ Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
-			log.Info("Startup policy: using adaptive throttling for resume",
+			log.Info("🚀 Startup policy: using adaptive throttling for resume",
 				"policy", policy.Name,
 				"workloads", len(deployments.Items)+len(statefulSets.Items))
 
@@ -524,7 +511,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			}
 		} else {
 			// Fallback: resume all workloads immediately (old behavior)
-			log.Info("Startup policy: resuming all workloads immediately (no throttling)",
+			log.Info("⚡ Startup policy: resuming all workloads immediately (no throttling)",
 				"policy", policy.Name,
 				"workloads", len(deployments.Items)+len(statefulSets.Items))
 
@@ -544,11 +531,10 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		policy.Status.Phase = appsv1alpha1.PhaseResumed
 		policy.Status.LastResumeAt = &now
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
-		// Mark this operationId as handled to prevent duplicate processing
-		if policy.Spec.OperationId != "" {
-			policy.Status.LastHandledOperationId = policy.Spec.OperationId
-		}
-		log.Info("Startup policy applied: resumed", "policy", policy.Name)
+		// NOTE: Do NOT set LastHandledOperationId here!
+		// Startup policy is independent of manual operations (spec.action/operationId)
+		// Setting it here would incorrectly mark manual operations as handled
+		log.Info("✅ Startup policy applied: resumed", "policy", policy.Name)
 	}
 
 	// Update status after applying - use retry to handle conflicts
@@ -564,7 +550,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		latestPolicy.Status.Message = policy.Status.Message
 		latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
 		latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
-		latestPolicy.Status.LastHandledOperationId = policy.Status.LastHandledOperationId
+		// Do NOT copy LastHandledOperationId - startup ops don't consume operationId
 
 		// Copy LastResumeAt if set
 		if policy.Status.LastResumeAt != nil {
@@ -676,6 +662,13 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		if elapsed < policy.Spec.ResumeDelay.Duration {
 			// Delay not yet complete
 			remaining := policy.Spec.ResumeDelay.Duration - elapsed
+			// Log at first check (when elapsed is very small) to show timer started
+			if elapsed < 2*time.Second {
+				log.Info("⏳ Startup resume delay timer started",
+					"totalDelay", policy.Spec.ResumeDelay.Duration,
+					"policy", policy.Name,
+					"targetNamespace", policy.Spec.TargetNamespace)
+			}
 			log.V(1).Info("Startup resume delay in progress",
 				"elapsed", elapsed,
 				"remaining", remaining,
@@ -684,7 +677,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		// Delay complete! Perform the startup resume now
-		log.Info("Startup resume delay completed - executing resume",
+		log.Info("🚀 Startup resume delay completed - executing resume",
 			"delay", policy.Spec.ResumeDelay.Duration,
 			"policy", policy.Name,
 			"targetNamespace", policy.Spec.TargetNamespace)
@@ -704,7 +697,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
-			log.Info("Executing startup resume with adaptive throttling",
+			log.Info("🚀 Executing startup resume with adaptive throttling",
 				"policy", policy.Name,
 				"workloads", len(deployments.Items)+len(statefulSets.Items))
 
@@ -714,7 +707,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			}
 		} else {
 			// Resume without throttling
-			log.Info("Executing startup resume without throttling",
+			log.Info("⚡ Executing startup resume without throttling",
 				"policy", policy.Name,
 				"workloads", len(deployments.Items)+len(statefulSets.Items))
 
@@ -740,10 +733,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
 		policy.Status.PendingStartupResume = false // Clear the pending flag
 
-		// Mark this operationId as handled to prevent duplicate processing
-		if policy.Spec.OperationId != "" {
-			policy.Status.LastHandledOperationId = policy.Spec.OperationId
-		}
+		// NOTE: Do NOT set LastHandledOperationId here!
+		// Startup policy is independent of manual operations (spec.action/operationId)
 
 		// Use retry to handle conflicts (adaptive throttling may have updated status)
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -758,7 +749,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			latestPolicy.Status.Message = policy.Status.Message
 			latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
 			latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
-			latestPolicy.Status.LastHandledOperationId = policy.Status.LastHandledOperationId
+			// Do NOT copy LastHandledOperationId - startup ops don't consume operationId
 			latestPolicy.Status.PendingStartupResume = false // Clear the pending flag
 
 			// Copy adaptive progress if set
@@ -959,7 +950,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
 			// Use adaptive throttling
-			log.Info("Resuming with adaptive throttling enabled",
+			log.Info("🚀 Resuming with adaptive throttling enabled",
 				"initialBatchSize", policy.Spec.AdaptiveThrottling.InitialBatchSize,
 				"deployments", len(deployments.Items),
 				"statefulsets", len(statefulSets.Items))
@@ -974,7 +965,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			}
 		} else {
 			// Use legacy resume (all at once)
-			log.Info("Resuming without throttling (legacy mode)",
+			log.Info("⚡ Resuming without throttling (legacy mode)",
 				"deployments", len(deployments.Items),
 				"statefulsets", len(statefulSets.Items))
 
@@ -1418,14 +1409,32 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.NamespaceLifecyclePolicy{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only trigger on generation changes (spec updates)
-				// Status updates (like PendingStartupResume) do NOT trigger reconcile
-				// This prevents unnecessary reconcile loops from operator's own status updates
-				return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+				// Trigger on generation changes (spec updates)
+				if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
+					return true
+				}
+
+				// Also trigger when PendingStartupResume becomes true
+				// This handles the startup delay scenario where status is updated but generation doesn't change
+				oldPolicy, oldOK := e.ObjectOld.(*appsv1alpha1.NamespaceLifecyclePolicy)
+				newPolicy, newOK := e.ObjectNew.(*appsv1alpha1.NamespaceLifecyclePolicy)
+				if oldOK && newOK {
+					// Trigger if PendingStartupResume changed from false to true
+					if !oldPolicy.Status.PendingStartupResume && newPolicy.Status.PendingStartupResume {
+						return true
+					}
+				}
+
+				// Don't trigger on other status updates
+				return false
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
-				// Always reconcile on create
-				return true
+				// Do NOT reconcile on create events
+				// Reason: When operator starts, informer sync generates create events for ALL existing CRs
+				// This would trigger reconcile for CRs that were already handled (operationId already processed)
+				// Startup policy is handled by startup runnable, not by create events
+				// For new CRs created while operator is running, update event will trigger reconcile anyway
+				return false
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// Trigger on delete

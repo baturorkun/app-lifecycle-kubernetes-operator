@@ -87,7 +87,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	resumedCount := int32(0)
 	startTime := time.Now()
 
-	log.Info("Starting adaptive throttling resume",
+	log.Info("🚀 Starting adaptive throttling resume",
 		"totalWorkloads", totalWorkloads,
 		"initialBatchSize", currentBatchSize,
 		"minBatchSize", minBatchSize,
@@ -110,7 +110,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 		// 2. Check for critical signals (Node NotReady)
 		if hasSignal(signals, appsv1alpha1.SignalNodeNotReady) {
-			log.Info("Node(s) NotReady detected, pausing resume",
+			log.Info("🔴 Node(s) NotReady detected, pausing resume",
 				"activeSignals", len(signals))
 
 			// Update status to show we're waiting
@@ -133,7 +133,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		currentBatchSize = r.calculateBatchSize(signals, config, currentBatchSize)
 
 		if currentBatchSize != previousBatchSize {
-			log.Info("Adjusted batch size",
+			log.Info("🐌 Throttling: Adjusted batch size",
 				"from", previousBatchSize,
 				"to", currentBatchSize,
 				"activeSignals", len(signals))
@@ -146,7 +146,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		}
 		batch := allWorkloads[resumedCount:batchEnd]
 
-		log.Info("Processing batch",
+		log.Info("📊 Processing batch",
 			"batchSize", len(batch),
 			"progress", fmt.Sprintf("%d/%d", resumedCount, totalWorkloads),
 			"activeSignals", len(signals))
@@ -177,7 +177,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		// 6. Wait between batches (unless this was the last batch)
 		if resumedCount < totalWorkloads {
 			waitDuration := r.calculateWaitDuration(signals, batchInterval)
-			log.Info("Waiting between batches",
+			log.Info("💤 Waiting between batches",
 				"duration", waitDuration,
 				"activeSignals", len(signals))
 			time.Sleep(waitDuration)
@@ -186,7 +186,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 	// All workloads resumed successfully
 	elapsed := time.Since(startTime)
-	log.Info("Adaptive throttling resume completed",
+	log.Info("✅ Adaptive throttling resume completed",
 		"totalWorkloads", totalWorkloads,
 		"duration", elapsed)
 

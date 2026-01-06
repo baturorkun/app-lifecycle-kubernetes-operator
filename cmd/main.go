@@ -89,24 +89,31 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 			continue
 		}
 
+		// Re-fetch the policy to get updated status (ApplyStartupPolicy updates status but not our local copy)
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+			setupLog.Error(err, "Failed to re-fetch policy after ApplyStartupPolicy", "policy", policy.Name)
+			continue
+		}
+
+		// Debug: Log the re-fetched status
+		setupLog.Info("🔍 Re-fetched policy after ApplyStartupPolicy",
+			"policy", latestPolicy.Name,
+			"pendingStartupResume", latestPolicy.Status.PendingStartupResume,
+			"phase", latestPolicy.Status.Phase,
+			"resumeDelay", latestPolicy.Spec.ResumeDelay.Duration)
+
 		// If policy has pending startup resume, manually trigger reconcile
 		// This is necessary because status updates don't trigger reconcile (by design)
 		// We need to manually start the delay timer via reconcile
-		if policy.Status.PendingStartupResume {
-			setupLog.Info("Triggering reconcile for pending startup resume",
-				"policy", policy.Name,
-				"delay", policy.Spec.ResumeDelay.Duration)
-
-			// Manually call Reconcile to start the delay timer
-			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{
-					Namespace: policy.Namespace,
-					Name:      policy.Name,
-				},
-			}
-			if _, err := reconciler.Reconcile(ctx, req); err != nil {
-				setupLog.Error(err, "Failed to trigger reconcile for pending startup resume", "policy", policy.Name)
-			}
+		// PendingStartupResume status has been set
+		// The Reconcile loop will automatically be triggered when status.PendingStartupResume becomes true
+		// (via the UpdateFunc predicate in SetupWithManager)
+		// The Reconcile loop will handle the delay and execute the resume after ResumeDelay expires
+		if latestPolicy.Status.PendingStartupResume {
+			setupLog.Info("✅ Pending startup resume scheduled - Reconcile loop will handle delay",
+				"policy", latestPolicy.Name,
+				"delay", latestPolicy.Spec.ResumeDelay.Duration)
 		}
 	}
 
