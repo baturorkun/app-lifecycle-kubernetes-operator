@@ -575,6 +575,11 @@ spec:
                   message provides a human-readable message about the current status.
                   This field typically contains details about the current operation or any errors encountered.
                 type: string
+              pendingStartupResume:
+                description: |-
+                  pendingStartupResume indicates whether a startup resume operation is pending with a delay
+                  When true, the operator will wait for the delay period before resuming the namespace
+                type: boolean
               phase:
                 description: |-
                   phase represents the current phase of the namespace lifecycle operation.
@@ -597,6 +602,12 @@ spec:
                   startup action was applied
                 format: int32
                 type: integer
+              startupResumeDelayStartedAt:
+                description: |-
+                  startupResumeDelayStartedAt stores the timestamp when the startup resume delay began
+                  Used in conjunction with pendingStartupResume to calculate remaining delay time
+                format: date-time
+                type: string
             type: object
         required:
         - spec

@@ -448,6 +448,16 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	AdaptiveProgress *AdaptiveProgressStatus `json:"adaptiveProgress,omitempty"`
 
+	// pendingStartupResume indicates whether a startup resume operation is pending with a delay
+	// When true, the operator will wait for the delay period before resuming the namespace
+	// +optional
+	PendingStartupResume bool `json:"pendingStartupResume,omitempty"`
+
+	// startupResumeDelayStartedAt stores the timestamp when the startup resume delay began
+	// Used in conjunction with pendingStartupResume to calculate remaining delay time
+	// +optional
+	StartupResumeDelayStartedAt *metav1.Time `json:"startupResumeDelayStartedAt,omitempty"`
+
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//

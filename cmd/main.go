@@ -31,6 +31,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -85,6 +86,27 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
 			setupLog.Error(err, "Failed to apply startup policy", "policy", policy.Name)
 			// Continue with other policies even if one fails
+			continue
+		}
+
+		// If policy has pending startup resume, manually trigger reconcile
+		// This is necessary because status updates don't trigger reconcile (by design)
+		// We need to manually start the delay timer via reconcile
+		if policy.Status.PendingStartupResume {
+			setupLog.Info("Triggering reconcile for pending startup resume",
+				"policy", policy.Name,
+				"delay", policy.Spec.ResumeDelay.Duration)
+
+			// Manually call Reconcile to start the delay timer
+			req := ctrl.Request{
+				NamespacedName: client.ObjectKey{
+					Namespace: policy.Namespace,
+					Name:      policy.Name,
+				},
+			}
+			if _, err := reconciler.Reconcile(ctx, req); err != nil {
+				setupLog.Error(err, "Failed to trigger reconcile for pending startup resume", "policy", policy.Name)
+			}
 		}
 	}
 

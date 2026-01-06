@@ -212,27 +212,44 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 		return err
 	}
 
-	// Restore original replica count
-	replicas := int32(originalReplicas)
-	deployment.Spec.Replicas = &replicas
-
-	// Restore original terminationGracePeriodSeconds if exists
-	if originalGraceStr, ok := deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
-		if originalGraceStr == nilAnnotationValue {
-			deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
-		} else {
-			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
-			if err == nil {
-				deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
-			}
+	// Use retry to handle concurrent updates
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version
+		latestDeployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, latestDeployment); err != nil {
+			return err
 		}
-		delete(deployment.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
-	}
 
-	// Remove the annotation
-	delete(deployment.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
+		// Check again if annotation still exists (might have been resumed already)
+		if _, exists := latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas]; !exists {
+			log.V(1).Info("Deployment already resumed, skipping",
+				"deployment", latestDeployment.Name,
+				"namespace", latestDeployment.Namespace)
+			return nil
+		}
 
-	return r.Update(ctx, deployment)
+		// Restore original replica count
+		replicas := int32(originalReplicas)
+		latestDeployment.Spec.Replicas = &replicas
+
+		// Restore original terminationGracePeriodSeconds if exists
+		if originalGraceStr, ok := latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
+			if originalGraceStr == nilAnnotationValue {
+				latestDeployment.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+			} else {
+				val, err := strconv.ParseInt(originalGraceStr, 10, 64)
+				if err == nil {
+					latestDeployment.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
+				}
+			}
+			delete(latestDeployment.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
+		}
+
+		// Remove the annotation
+		delete(latestDeployment.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
+
+		return r.Update(ctx, latestDeployment)
+	})
 }
 
 // resumeStatefulSet restores the statefulset replicas from the annotation
@@ -254,27 +271,44 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 		return err
 	}
 
-	// Restore original replica count
-	replicas := int32(originalReplicas)
-	sts.Spec.Replicas = &replicas
-
-	// Restore original terminationGracePeriodSeconds if exists
-	if originalGraceStr, ok := sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
-		if originalGraceStr == nilAnnotationValue {
-			sts.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
-		} else {
-			val, err := strconv.ParseInt(originalGraceStr, 10, 64)
-			if err == nil {
-				sts.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
-			}
+	// Use retry to handle concurrent updates
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version
+		latestSts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, latestSts); err != nil {
+			return err
 		}
-		delete(sts.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
-	}
 
-	// Remove the annotation
-	delete(sts.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
+		// Check again if annotation still exists (might have been resumed already)
+		if _, exists := latestSts.Annotations[appsv1alpha1.AnnotationOriginalReplicas]; !exists {
+			log.V(1).Info("StatefulSet already resumed, skipping",
+				"statefulset", latestSts.Name,
+				"namespace", latestSts.Namespace)
+			return nil
+		}
 
-	return r.Update(ctx, sts)
+		// Restore original replica count
+		replicas := int32(originalReplicas)
+		latestSts.Spec.Replicas = &replicas
+
+		// Restore original terminationGracePeriodSeconds if exists
+		if originalGraceStr, ok := latestSts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod]; ok {
+			if originalGraceStr == nilAnnotationValue {
+				latestSts.Spec.Template.Spec.TerminationGracePeriodSeconds = nil
+			} else {
+				val, err := strconv.ParseInt(originalGraceStr, 10, 64)
+				if err == nil {
+					latestSts.Spec.Template.Spec.TerminationGracePeriodSeconds = &val
+				}
+			}
+			delete(latestSts.Annotations, appsv1alpha1.AnnotationOriginalTerminationGracePeriod)
+		}
+
+		// Remove the annotation
+		delete(latestSts.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
+
+		return r.Update(ctx, latestSts)
+	})
 }
 
 // updateStatus updates the policy status with phase, message and lastHandledOperationId
@@ -383,24 +417,11 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	}
 
 	// Apply resumeDelay if this is a Resume startup action
-	// Delegate to Reconcile loop for delay handling
+	// Set status fields instead of annotations - cleaner and follows Kubernetes best practices
 	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.ResumeDelay.Duration > 0 {
-		log.Info("Resume delay configured for startup policy - delegating to Reconcile loop",
+		log.Info("Resume delay configured for startup policy - setting status for Reconcile loop",
 			"delay", policy.Spec.ResumeDelay.Duration,
 			"targetNamespace", policy.Spec.TargetNamespace)
-
-		// Mark this as a startup resume that needs delay
-		// The Reconcile loop will handle the delay and resume
-		if policy.Annotations == nil {
-			policy.Annotations = make(map[string]string)
-		}
-		policy.Annotations["apps.ops.dev/pending-startup-resume"] = "true"
-		policy.Annotations["apps.ops.dev/startup-resume-delay-start"] = time.Now().Format(time.RFC3339)
-
-		if err := r.Update(ctx, policy); err != nil {
-			log.Error(err, "Failed to mark policy for delayed startup resume")
-			return err
-		}
 
 		// Update status with retry to handle concurrent updates
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -410,7 +431,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				return err
 			}
 
-			// Update status to show we're waiting
+			// Mark as pending startup resume in status
+			latestPolicy.Status.PendingStartupResume = true
+			latestPolicy.Status.StartupResumeDelayStartedAt = &now
 			latestPolicy.Status.Phase = appsv1alpha1.PhaseIdle
 			latestPolicy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.ResumeDelay.Duration)
 			latestPolicy.Status.LastStartupAt = &now
@@ -419,7 +442,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			return r.Status().Update(ctx, latestPolicy)
 		}); err != nil {
 			log.Error(err, "Failed to update status for delayed startup resume")
-			// Don't return error - the annotation is already set, reconcile loop will handle it
+			return err
 		}
 
 		// Return success - Reconcile loop will handle the actual resume after delay
@@ -483,6 +506,10 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 		policy.Status.Phase = appsv1alpha1.PhaseFrozen
 		policy.Status.LastStartupAction = "FREEZE_APPLIED"
+		// Mark this operationId as handled to prevent duplicate processing
+		if policy.Spec.OperationId != "" {
+			policy.Status.LastHandledOperationId = policy.Spec.OperationId
+		}
 		log.Info("Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
 		// Check if adaptive throttling is enabled
@@ -517,6 +544,10 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		policy.Status.Phase = appsv1alpha1.PhaseResumed
 		policy.Status.LastResumeAt = &now
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
+		// Mark this operationId as handled to prevent duplicate processing
+		if policy.Spec.OperationId != "" {
+			policy.Status.LastHandledOperationId = policy.Spec.OperationId
+		}
 		log.Info("Startup policy applied: resumed", "policy", policy.Name)
 	}
 
@@ -533,6 +564,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		latestPolicy.Status.Message = policy.Status.Message
 		latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
 		latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+		latestPolicy.Status.LastHandledOperationId = policy.Status.LastHandledOperationId
 
 		// Copy LastResumeAt if set
 		if policy.Status.LastResumeAt != nil {
@@ -628,132 +660,120 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 	}
 
-	// Handle pending startup resume with delay
-	if pendingStartup, hasPending := policy.Annotations["apps.ops.dev/pending-startup-resume"]; hasPending && pendingStartup == "true" {
-		delayStartStr := policy.Annotations["apps.ops.dev/startup-resume-delay-start"]
-		if delayStartStr == "" {
-			log.Error(fmt.Errorf("missing delay start time"), "Pending startup resume has no start time")
-			// Clean up and let normal flow handle it
-			delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
-			delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
-			if err := r.Update(ctx, &policy); err != nil {
-				log.Error(err, "Failed to clean up invalid pending startup resume")
+	// Handle pending startup resume with delay using status fields
+	if policy.Status.PendingStartupResume {
+		if policy.Status.StartupResumeDelayStartedAt == nil {
+			log.Error(fmt.Errorf("missing delay start time"), "Pending startup resume has no start time in status")
+			// Clear the pending flag
+			policy.Status.PendingStartupResume = false
+			if err := r.Status().Update(ctx, &policy); err != nil {
+				log.Error(err, "Failed to clear invalid pending startup resume")
+			}
+			return ctrl.Result{}, nil
+		}
+
+		elapsed := time.Since(policy.Status.StartupResumeDelayStartedAt.Time)
+		if elapsed < policy.Spec.ResumeDelay.Duration {
+			// Delay not yet complete
+			remaining := policy.Spec.ResumeDelay.Duration - elapsed
+			log.V(1).Info("Startup resume delay in progress",
+				"elapsed", elapsed,
+				"remaining", remaining,
+				"policy", policy.Name)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+
+		// Delay complete! Perform the startup resume now
+		log.Info("Startup resume delay completed - executing resume",
+			"delay", policy.Spec.ResumeDelay.Duration,
+			"policy", policy.Name,
+			"targetNamespace", policy.Spec.TargetNamespace)
+
+		// Execute the resume operation
+		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list deployments for startup resume")
+			return ctrl.Result{}, err
+		}
+
+		statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list statefulsets for startup resume")
+			return ctrl.Result{}, err
+		}
+
+		// Check if adaptive throttling is enabled
+		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+			log.Info("Executing startup resume with adaptive throttling",
+				"policy", policy.Name,
+				"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
+				log.Error(err, "Failed to resume with adaptive throttling during delayed startup")
+				return ctrl.Result{}, err
 			}
 		} else {
-			delayStart, err := time.Parse(time.RFC3339, delayStartStr)
-			if err != nil {
-				log.Error(err, "Failed to parse startup resume delay start time")
-				// Clean up bad annotation
-				delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
-				delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
-				if err := r.Update(ctx, &policy); err != nil {
-					log.Error(err, "Failed to clean up invalid pending startup resume")
+			// Resume without throttling
+			log.Info("Executing startup resume without throttling",
+				"policy", policy.Name,
+				"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+			for i := range deployments.Items {
+				deployment := &deployments.Items[i]
+				if err := r.resumeDeployment(ctx, deployment); err != nil {
+					log.Error(err, "Failed to resume deployment during delayed startup", "name", deployment.Name)
 				}
-			} else {
-				elapsed := time.Since(delayStart)
-				if elapsed < policy.Spec.ResumeDelay.Duration {
-					// Delay not yet complete
-					remaining := policy.Spec.ResumeDelay.Duration - elapsed
-					log.V(1).Info("Startup resume delay in progress",
-						"elapsed", elapsed,
-						"remaining", remaining,
-						"policy", policy.Name)
-					return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+			for i := range statefulSets.Items {
+				sts := &statefulSets.Items[i]
+				if err := r.resumeStatefulSet(ctx, sts); err != nil {
+					log.Error(err, "Failed to resume statefulset during delayed startup", "name", sts.Name)
 				}
-
-				// Delay complete! Perform the startup resume now
-				log.Info("Startup resume delay completed - executing resume",
-					"delay", policy.Spec.ResumeDelay.Duration,
-					"policy", policy.Name,
-					"targetNamespace", policy.Spec.TargetNamespace)
-
-				// Clean up the pending marker
-				delete(policy.Annotations, "apps.ops.dev/pending-startup-resume")
-				delete(policy.Annotations, "apps.ops.dev/startup-resume-delay-start")
-				if err := r.Update(ctx, &policy); err != nil {
-					log.Error(err, "Failed to remove pending startup resume marker")
-					return ctrl.Result{}, err
-				}
-
-				// Execute the resume operation
-				deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-				if err != nil {
-					log.Error(err, "Failed to list deployments for startup resume")
-					return ctrl.Result{}, err
-				}
-
-				statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-				if err != nil {
-					log.Error(err, "Failed to list statefulsets for startup resume")
-					return ctrl.Result{}, err
-				}
-
-				// Check if adaptive throttling is enabled
-				if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
-					log.Info("Executing startup resume with adaptive throttling",
-						"policy", policy.Name,
-						"workloads", len(deployments.Items)+len(statefulSets.Items))
-
-					if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
-						log.Error(err, "Failed to resume with adaptive throttling during delayed startup")
-						return ctrl.Result{}, err
-					}
-				} else {
-					// Resume without throttling
-					log.Info("Executing startup resume without throttling",
-						"policy", policy.Name,
-						"workloads", len(deployments.Items)+len(statefulSets.Items))
-
-					for i := range deployments.Items {
-						deployment := &deployments.Items[i]
-						if err := r.resumeDeployment(ctx, deployment); err != nil {
-							log.Error(err, "Failed to resume deployment during delayed startup", "name", deployment.Name)
-						}
-					}
-					for i := range statefulSets.Items {
-						sts := &statefulSets.Items[i]
-						if err := r.resumeStatefulSet(ctx, sts); err != nil {
-							log.Error(err, "Failed to resume statefulset during delayed startup", "name", sts.Name)
-						}
-					}
-				}
-
-				// Update status with retry on conflict
-				now := metav1.Now()
-				policy.Status.Phase = appsv1alpha1.PhaseResumed
-				policy.Status.Message = "Startup resume completed after delay"
-				policy.Status.LastResumeAt = &now
-				policy.Status.LastStartupAction = "RESUME_APPLIED"
-
-				// Use retry to handle conflicts (adaptive throttling may have updated status)
-				if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-					// Fetch latest version
-					latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-					if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
-						return err
-					}
-
-					// Apply status changes to latest version
-					latestPolicy.Status.Phase = policy.Status.Phase
-					latestPolicy.Status.Message = policy.Status.Message
-					latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
-					latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
-
-					// Copy adaptive progress if set
-					if policy.Status.AdaptiveProgress != nil {
-						latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
-					}
-
-					return r.Status().Update(ctx, latestPolicy)
-				}); err != nil {
-					log.Error(err, "Failed to update status after delayed startup resume")
-					return ctrl.Result{}, err
-				}
-
-				log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
-				return ctrl.Result{}, nil
 			}
 		}
+
+		// Update status with retry on conflict
+		now := metav1.Now()
+		policy.Status.Phase = appsv1alpha1.PhaseResumed
+		policy.Status.Message = "Startup resume completed after delay"
+		policy.Status.LastResumeAt = &now
+		policy.Status.LastStartupAction = "RESUME_APPLIED"
+		policy.Status.PendingStartupResume = false // Clear the pending flag
+
+		// Mark this operationId as handled to prevent duplicate processing
+		if policy.Spec.OperationId != "" {
+			policy.Status.LastHandledOperationId = policy.Spec.OperationId
+		}
+
+		// Use retry to handle conflicts (adaptive throttling may have updated status)
+		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			// Fetch latest version
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+
+			// Apply status changes to latest version
+			latestPolicy.Status.Phase = policy.Status.Phase
+			latestPolicy.Status.Message = policy.Status.Message
+			latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
+			latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+			latestPolicy.Status.LastHandledOperationId = policy.Status.LastHandledOperationId
+			latestPolicy.Status.PendingStartupResume = false // Clear the pending flag
+
+			// Copy adaptive progress if set
+			if policy.Status.AdaptiveProgress != nil {
+				latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
+			}
+
+			return r.Status().Update(ctx, latestPolicy)
+		}); err != nil {
+			log.Error(err, "Failed to update status after delayed startup resume")
+			return ctrl.Result{}, err
+		}
+
+		log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
+		return ctrl.Result{}, nil
 	}
 
 	// Check if this operation was already handled
@@ -1398,22 +1418,10 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.NamespaceLifecyclePolicy{}, builder.WithPredicates(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Trigger on generation changes (spec updates)
-				if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
-					return true
-				}
-
-				// Also trigger when pending-startup-resume annotation is present
-				newAnnotations := e.ObjectNew.GetAnnotations()
-				newPending := newAnnotations["apps.ops.dev/pending-startup-resume"]
-
-				// Trigger if pending annotation is "true" (regardless of whether it changed)
-				// This ensures reconcile runs after operator restarts to restore lost timers
-				if newPending == "true" {
-					return true
-				}
-
-				return false
+				// Only trigger on generation changes (spec updates)
+				// Status updates (like PendingStartupResume) do NOT trigger reconcile
+				// This prevents unnecessary reconcile loops from operator's own status updates
+				return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
 				// Always reconcile on create

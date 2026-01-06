@@ -197,6 +197,10 @@ func (in *NamespaceLifecyclePolicyStatus) DeepCopyInto(out *NamespaceLifecyclePo
 		*out = new(AdaptiveProgressStatus)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.StartupResumeDelayStartedAt != nil {
+		in, out := &in.StartupResumeDelayStartedAt, &out.StartupResumeDelayStartedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))
