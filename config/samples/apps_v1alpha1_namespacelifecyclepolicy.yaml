@@ -30,15 +30,16 @@ spec:
   # Can be used for tracking and correlation purposes.
   # operationId: "op-123456789-2"
 
-  # resumeDelay specifies how long to wait before starting the operation.
-  # Applies to both startup (when startupPolicy triggers) and manual operations.
-  # Useful for staggering multiple namespace resume operations to prevent
-  # simultaneous resume bursts that could overload nodes.
+  # resumeDelay specifies how long to wait before starting the Resume operation.
+  # ONLY applies to startup (when startupPolicy: Resume triggers).
+  # Does NOT apply to manual Resume operations (changing spec.action).
+  # Useful for staggering multiple namespace resume operations during cluster startup
+  # to prevent simultaneous resume bursts that could overload nodes.
   # Default: 0s (no delay)
   # Example: Use different delays for different namespaces:
-  #   namespace-1: resumeDelay: 0s    (starts immediately)
-  #   namespace-2: resumeDelay: 30s   (waits 30 seconds)
-  #   namespace-3: resumeDelay: 60s   (waits 60 seconds)
+  #   namespace-1: resumeDelay: 0s    (starts immediately at startup)
+  #   namespace-2: resumeDelay: 30s   (waits 30 seconds at startup)
+  #   namespace-3: resumeDelay: 60s   (waits 60 seconds at startup)
   # resumeDelay: 0s
 
   # ============================================================================
