@@ -284,6 +284,10 @@ type SignalChecksConfig struct {
 	// This signal fires when nodes reach high usage, allowing preventative throttling
 	// +optional
 	CheckNodeUsage *NodeUsageCheckConfig `json:"checkNodeUsage,omitempty"`
+
+	// checkContainerRestarts enables monitoring of container restarts and CrashLoopBackOff states
+	// +optional
+	CheckContainerRestarts *ContainerRestartsCheckConfig `json:"checkContainerRestarts,omitempty"`
 }
 
 // NodeReadyCheckConfig defines configuration for node Ready status monitoring
@@ -390,6 +394,30 @@ type NodeUsageCheckConfig struct {
 	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
 }
 
+// ContainerRestartsCheckConfig defines configuration for container restart monitoring
+type ContainerRestartsCheckConfig struct {
+	// enabled activates container restart checking
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// restartThreshold is the number of restarts that triggers throttling
+	// Default: 10
+	// +optional
+	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	RestartThreshold int32 `json:"restartThreshold,omitempty"`
+
+	// slowdownPercent is the percentage of current batch size to use when restarts exceed threshold
+	// For example, 50 means reduce batch size to 50% of current value
+	// Default: 50
+	// +optional
+	// +kubebuilder:default=50
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=100
+	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
+}
+
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
 type NamespaceLifecyclePolicyStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
@@ -448,6 +476,14 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	AdaptiveProgress *AdaptiveProgressStatus `json:"adaptiveProgress,omitempty"`
 
+	// NodeReadyEventDetectedAt is the time when a node ready event was last detected
+	// +optional
+	NodeReadyEventDetectedAt *metav1.Time `json:"nodeReadyEventDetectedAt,omitempty"`
+
+	// NodeReadyEventHandledAt is the time when the last detected node ready event was processed
+	// +optional
+	NodeReadyEventHandledAt *metav1.Time `json:"nodeReadyEventHandledAt,omitempty"`
+
 	// pendingStartupResume indicates whether a startup resume operation is pending with a delay
 	// When true, the operator will wait for the delay period before resuming the namespace
 	// +optional
@@ -501,7 +537,7 @@ type AdaptiveProgressStatus struct {
 }
 
 // SignalType defines the type of signal detected
-// +kubebuilder:validation:Enum=NodeNotReady;NodePressure;PendingPods;NodeUsage
+// +kubebuilder:validation:Enum=NodeNotReady;NodePressure;PendingPods;NodeUsage;ContainerRestarts
 type SignalType string
 
 const (
@@ -517,6 +553,9 @@ const (
 	// SignalNodeUsage indicates nodes are experiencing high resource usage
 	// This is a proactive signal based on real-time kubelet metrics
 	SignalNodeUsage SignalType = "NodeUsage"
+
+	// SignalContainerRestarts indicates too many container restarts or CrashLoopBackOff detected
+	SignalContainerRestarts SignalType = "ContainerRestarts"
 )
 
 // SignalSeverity defines the severity level of a signal

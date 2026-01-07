@@ -95,6 +95,40 @@ spec:
   balanceWindowSeconds: 600  # Watch for new nodes for 10 minutes
 ```
 
+### 🐌 Adaptive Throttling
+Prevents cluster congestion when resuming many workloads at once:
+- **Batch Processing**: Resumes workloads in controlled batches instead of all at once
+- **Throttling Signals**: Automatically slows down or pauses based on cluster health:
+  - **NodeUsage**: High CPU or Memory usage on any node
+  - **PendingPods**: Total number of pods in Pending state across the cluster
+  - **NodeNotReady**: Presence of NotReady worker nodes
+  - **ContainerRestarts**: Detection of high restart counts or `CrashLoopBackOff` pods
+- **Intelligent Wait**: Adjusts wait time between batches based on active signals
+- **Log Transparency**: Throttling logs include real-time metrics (CPU%, Mem%, Pending count, Crash count)
+
+Example:
+```yaml
+spec:
+  adaptiveThrottling:
+    enabled: true
+    batchSize: 3
+    batchInterval: 10
+    signalChecks:
+      checkNodeUsage:
+        enabled: true
+        cpuThreshold: 80
+      checkContainerRestarts:
+        enabled: true
+        restartThreshold: 10
+```
+
+### 🔍 Logging & Debugging
+Control log verbosity for easier troubleshooting:
+- **Noise Reduction**: Clean logs by default, suppressing redundant Kubernetes framework metadata
+- **Enhanced Transparency**: Real-time metrics included in throttling and processing logs
+- **Debug Toggle**: Easily switch to detailed logging via flag or environment variable
+- **Named Loggers**: Filter logs using sub-system tags like `adaptive`, `node-event`, or `startup-check`
+
 ## Quick Start
 
 ### Installation
@@ -102,7 +136,8 @@ spec:
 **Option 1: Run locally (recommended for development)**
 ```sh
 make install  # Install CRDs
-make run      # Run operator locally
+make run      # Run operator locally (Info level)
+DEBUG=true make run  # Run with full debug logging
 ```
 
 **Option 2: Deploy to cluster**
@@ -279,14 +314,46 @@ This will:
 - Status shows how many nodes were ready and wait time
 - If timeout reached, proceeds with available nodes
 
-**Alternative - Wait for minimum nodes:**
-```yaml
 startupNodeReadinessPolicy:
   enabled: true
   requireAllNodes: false   # Use minReadyNodes instead
   minReadyNodes: 2         # Wait for at least 2 nodes
   timeoutSeconds: 120
 ```
+
+### Example 8: Progressive Resume with Health Signals
+
+```yaml
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: heavy-prod-resume
+spec:
+  targetNamespace: production
+  action: Resume
+  adaptiveThrottling:
+    enabled: true
+    batchSize: 5
+    batchInterval: 15
+    signalChecks:
+      checkNodeUsage:
+        enabled: true
+        cpuThreshold: 75
+        memThreshold: 85
+      checkPendingPods:
+        enabled: true
+        threshold: 10
+      checkContainerRestarts:
+        enabled: true
+        restartThreshold: 5
+```
+
+This will:
+- Resume in batches of 5
+- Wait 15s between batches
+- **Proactive Slowdown**: Reduce batch size if pods are pending or nodes are busy
+- **Auto-Pause**: Wait if any node is too busy or if apps are crashing/restarting
+- **Logging**: Provides logs like `💤 Waiting between batches {"cpu": "78%", "pending": 12, "signals": ["NodeUsage", "PendingPods"]}`
 
 ## API Reference
 
@@ -310,6 +377,14 @@ startupNodeReadinessPolicy:
 | `startupNodeReadinessPolicy.minReadyNodes` | int32 | No | Minimum ready nodes required (only used when requireAllNodes is false, default: 1) |
 | `startupNodeReadinessPolicy.timeoutSeconds` | int32 | No | Max wait time for nodes (default: 60, max: 600) |
 | `startupNodeReadinessPolicy.nodeSelector` | map | No | Select which nodes to count (default: `{"node-role.kubernetes.io/worker": ""}`) |
+| `adaptiveThrottling` | object | No | Configuration for progressive resume |
+| `adaptiveThrottling.enabled` | boolean | No | Enable adaptive throttling (default: false) |
+| `adaptiveThrottling.batchSize` | int32 | No | Starting items per batch (default: 3) |
+| `adaptiveThrottling.batchInterval` | int32 | No | Base wait seconds between batches (default: 5) |
+| `adaptiveThrottling.signalChecks` | object | No | Throttling signal configurations |
+| `adaptiveThrottling.signalChecks.checkNodeUsage.enabled` | boolean | No | Pause on high CPU/Mem (default: true) |
+| `adaptiveThrottling.signalChecks.checkNodeUsage.cpuThreshold` | int32 | No | CPU percentage to trigger throttling (default: 80) |
+| `adaptiveThrottling.signalChecks.checkContainerRestarts.enabled` | boolean | No | Throttling on app crashes (default: true) |
 
 ### NamespaceLifecyclePolicyStatus
 
@@ -323,6 +398,9 @@ startupNodeReadinessPolicy:
 | `lastResumeAt` | timestamp | When last Resume operation completed (used for pod balancing time window) |
 | `startupReadyNodes` | int32 | How many nodes were ready during startup (when node readiness check enabled) |
 | `startupNodesWaited` | int32 | How many seconds waited for nodes during startup |
+| `nodeReadyEventDetectedAt` | timestamp | Last node Ready transition detected (at top level) |
+| `nodeReadyEventHandledAt` | timestamp | Last node Ready transition handled (at top level) |
+| `adaptiveProgress` | object | Detail of current throttling progress (currentBatch, totalWorkloads, etc.) |
 | `conditions` | []Condition | Kubernetes standard conditions (reserved for future use) |
 
 ### Startup Policy Actions

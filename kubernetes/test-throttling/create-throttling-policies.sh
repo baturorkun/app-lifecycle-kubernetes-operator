@@ -125,6 +125,13 @@ spec:
         threshold: 5
         slowdownPercent: 70
 
+      # Signal 5: Container Restarts (Warning - SLOW DOWN)
+      # CLUSTER-WIDE: Detects pods in CrashLoopBackOff or with high restart counts
+      checkContainerRestarts:
+        enabled: true
+        restartThreshold: 10
+        slowdownPercent: 50
+
     # Monitor worker nodes
     nodeSelector:
       node-role.kubernetes.io/worker: ""

@@ -123,74 +123,90 @@ func (r *NamespaceLifecyclePolicyReconciler) listStatefulSets(ctx context.Contex
 
 // freezeDeployment sets the deployment replicas to 0 and stores the original count in an annotation
 func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Context, deployment *appsv1.Deployment, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
-	// If already frozen (replicas = 0), skip
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
-		return nil
-	}
-
-	// Store original replica count in annotation
-	if deployment.Annotations == nil {
-		deployment.Annotations = make(map[string]string)
-	}
-
-	originalReplicas := int32(1) // default
-	if deployment.Spec.Replicas != nil {
-		originalReplicas = *deployment.Spec.Replicas
-	}
-
-	deployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
-
-	// Handle terminationGracePeriodSeconds override
-	if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.Deployment != nil {
-		if deployment.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
-			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
-		} else {
-			deployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version
+		latestDeployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, latestDeployment); err != nil {
+			return err
 		}
-		deployment.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.Deployment
-	}
 
-	// Set replicas to 0
-	zero := int32(0)
-	deployment.Spec.Replicas = &zero
+		// If already frozen (replicas = 0), skip
+		if latestDeployment.Spec.Replicas != nil && *latestDeployment.Spec.Replicas == 0 {
+			return nil
+		}
 
-	return r.Update(ctx, deployment)
+		// Store original replica count in annotation
+		if latestDeployment.Annotations == nil {
+			latestDeployment.Annotations = make(map[string]string)
+		}
+
+		originalReplicas := int32(1) // default
+		if latestDeployment.Spec.Replicas != nil {
+			originalReplicas = *latestDeployment.Spec.Replicas
+		}
+
+		latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
+
+		// Handle terminationGracePeriodSeconds override
+		if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.Deployment != nil {
+			if latestDeployment.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+				latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*latestDeployment.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
+			} else {
+				latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
+			}
+			latestDeployment.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.Deployment
+		}
+
+		// Set replicas to 0
+		zero := int32(0)
+		latestDeployment.Spec.Replicas = &zero
+
+		return r.Update(ctx, latestDeployment)
+	})
 }
 
 // freezeStatefulSet sets the statefulset replicas to 0 and stores the original count in an annotation
 func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
-	// If already frozen (replicas = 0), skip
-	if sts.Spec.Replicas != nil && *sts.Spec.Replicas == 0 {
-		return nil
-	}
-
-	// Store original replica count in annotation
-	if sts.Annotations == nil {
-		sts.Annotations = make(map[string]string)
-	}
-
-	originalReplicas := int32(1) // default
-	if sts.Spec.Replicas != nil {
-		originalReplicas = *sts.Spec.Replicas
-	}
-
-	sts.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
-
-	// Handle terminationGracePeriodSeconds override
-	if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.StatefulSet != nil {
-		if sts.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
-			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*sts.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
-		} else {
-			sts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version
+		latestSts := &appsv1.StatefulSet{}
+		if err := r.Get(ctx, types.NamespacedName{Name: sts.Name, Namespace: sts.Namespace}, latestSts); err != nil {
+			return err
 		}
-		sts.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.StatefulSet
-	}
 
-	// Set replicas to 0
-	zero := int32(0)
-	sts.Spec.Replicas = &zero
+		// If already frozen (replicas = 0), skip
+		if latestSts.Spec.Replicas != nil && *latestSts.Spec.Replicas == 0 {
+			return nil
+		}
 
-	return r.Update(ctx, sts)
+		// Store original replica count in annotation
+		if latestSts.Annotations == nil {
+			latestSts.Annotations = make(map[string]string)
+		}
+
+		originalReplicas := int32(1) // default
+		if latestSts.Spec.Replicas != nil {
+			originalReplicas = *latestSts.Spec.Replicas
+		}
+
+		latestSts.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
+
+		// Handle terminationGracePeriodSeconds override
+		if policy != nil && policy.Spec.TerminationGracePeriodSeconds != nil && policy.Spec.TerminationGracePeriodSeconds.StatefulSet != nil {
+			if latestSts.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+				latestSts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = strconv.FormatInt(*latestSts.Spec.Template.Spec.TerminationGracePeriodSeconds, 10)
+			} else {
+				latestSts.Annotations[appsv1alpha1.AnnotationOriginalTerminationGracePeriod] = nilAnnotationValue
+			}
+			latestSts.Spec.Template.Spec.TerminationGracePeriodSeconds = policy.Spec.TerminationGracePeriodSeconds.StatefulSet
+		}
+
+		// Set replicas to 0
+		zero := int32(0)
+		latestSts.Spec.Replicas = &zero
+
+		return r.Update(ctx, latestSts)
+	})
 }
 
 // resumeDeployment restores the deployment replicas from the annotation
@@ -336,7 +352,9 @@ func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, p
 // ApplyStartupPolicy applies the startup policy action to the namespace
 // This is called once during operator startup for each policy
 func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
-	log := logf.FromContext(ctx)
+	// Use a clean logger without framework metadata noise
+	log := logf.Log.WithValues("policy", policy.Name)
+	ctx = logf.IntoContext(ctx, log)
 
 	// Record timestamp - set this at the very beginning
 	now := metav1.Now()
@@ -582,18 +600,21 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.22.4/pkg/reconcile
 func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := ctrl.Log
 
 	// Fetch the NamespaceLifecyclePolicy CR
 	var policy appsv1alpha1.NamespaceLifecyclePolicy
 	if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
 		if errors.IsNotFound(err) {
-			log.Info("NamespaceLifecyclePolicy deleted", "name", req.Name)
+			ctrl.Log.Info("NamespaceLifecyclePolicy deleted", "name", req.Name)
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "Failed to get NamespaceLifecyclePolicy")
+		ctrl.Log.Error(err, "Failed to get NamespaceLifecyclePolicy")
 		return ctrl.Result{}, err
 	}
+
+	// Use a clean logger without framework metadata noise
+	log := logf.Log.WithValues("policy", policy.Name)
+	ctx = logf.IntoContext(ctx, log)
 
 	// Check for duplicate policies targeting the same namespace
 	// We want to ensure only one policy manages a namespace at a time.
@@ -770,7 +791,15 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	// Check if this operation was already handled
 	if r.shouldSkipOperation(&policy) {
 		// Only check balancing if this reconcile was triggered by a node event
-		if _, hasNodeEvent := policy.Annotations["apps.ops.dev/node-ready-event"]; hasNodeEvent {
+		hasNodeEvent := false
+		if policy.Status.NodeReadyEventDetectedAt != nil {
+			if policy.Status.NodeReadyEventHandledAt == nil ||
+				policy.Status.NodeReadyEventDetectedAt.After(policy.Status.NodeReadyEventHandledAt.Time) {
+				hasNodeEvent = true
+			}
+		}
+
+		if hasNodeEvent {
 			log.Info("Operation handled, checking for pod balancing due to node event",
 				"operationId", policy.Spec.OperationId,
 				"policy", policy.Name)
@@ -798,15 +827,16 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				}
 			}
 
-			// Remove the node-ready annotation after processing
-			delete(policy.Annotations, "apps.ops.dev/node-ready-event")
-			if err := r.Update(ctx, &policy); err != nil {
-				log.Error(err, "Failed to remove node-ready annotation")
+			// Mark the node-ready event as handled in status
+			now := metav1.Now()
+			policy.Status.NodeReadyEventHandledAt = &now
+			if err := r.Status().Update(ctx, &policy); err != nil {
+				log.Error(err, "Failed to update node-ready handled status")
 				return ctrl.Result{}, err
 			}
 		} else {
 			// No node event and operation already handled - safe to skip
-			log.Info("Skipping operation: already handled", "operationId", policy.Spec.OperationId)
+			log.V(1).Info("Skipping operation: already handled", "operationId", policy.Spec.OperationId)
 		}
 
 		return ctrl.Result{}, nil
@@ -840,7 +870,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{}, err
 	}
 
-	log.Info("Target namespace exists", "namespace", policy.Spec.TargetNamespace)
+	log.Info("Preparing to execute operation", "action", policy.Spec.Action, "namespace", policy.Spec.TargetNamespace)
 
 	// Update status to processing phase
 	var phase appsv1alpha1.Phase
@@ -910,6 +940,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	// Apply action
 	switch policy.Spec.Action {
 	case appsv1alpha1.LifecycleActionFreeze:
+		log.Info("❄️ Freezing all resources in namespace", "namespace", policy.Spec.TargetNamespace)
+
 		// Freeze all deployments
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
@@ -937,6 +969,10 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				return ctrl.Result{}, err
 			}
 		}
+
+		log.Info("✅ Successfully frozen all resources",
+			"deployments", len(deployments.Items),
+			"statefulsets", len(statefulSets.Items))
 
 		// Update status to frozen
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFrozen,
@@ -1139,7 +1175,7 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForNodesReady(
 	ctx context.Context,
 	policy *appsv1alpha1.StartupNodeReadinessPolicy,
 ) (readyNodes int32, secondsWaited int32, err error) {
-	log := logf.FromContext(ctx)
+	log := logf.Log.WithName("startup-check")
 
 	// Get configuration with defaults
 	timeout := int32(60) // default
@@ -1231,7 +1267,7 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForNodesReady(
 
 // mapNodeReadyToPolicy maps Node Ready/NotReady events to NamespaceLifecyclePolicy resources
 func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
-	log := logf.FromContext(ctx)
+	log := logf.Log.WithName("node-event")
 
 	node, ok := obj.(*corev1.Node)
 	if !ok {
@@ -1289,14 +1325,12 @@ func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Co
 	for i := range policyList.Items {
 		policy := &policyList.Items[i]
 		if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
-			// Add annotation to mark this reconcile was triggered by node event
-			if policy.Annotations == nil {
-				policy.Annotations = make(map[string]string)
-			}
-			policy.Annotations["apps.ops.dev/node-ready-event"] = time.Now().Format(time.RFC3339)
+			// Update status to mark this reconcile was triggered by node event
+			now := metav1.Now()
+			policy.Status.NodeReadyEventDetectedAt = &now
 
-			if err := r.Update(ctx, policy); err != nil {
-				log.Error(err, "Failed to add node-ready annotation", "policy", policy.Name)
+			if err := r.Status().Update(ctx, policy); err != nil {
+				log.Error(err, "Failed to update node-ready status", "policy", policy.Name)
 				continue
 			}
 
@@ -1337,7 +1371,7 @@ func (r *NamespaceLifecyclePolicyReconciler) shouldPerformBalancing(policy *apps
 
 // performBalancing triggers rolling restart on all deployments/statefulsets in target namespace
 func (r *NamespaceLifecyclePolicyReconciler) performBalancing(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
-	log := logf.FromContext(ctx)
+	log := logf.Log.WithValues("policy", policy.Name)
 
 	// List deployments
 	deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
@@ -1414,14 +1448,22 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 					return true
 				}
 
-				// Also trigger when PendingStartupResume becomes true
-				// This handles the startup delay scenario where status is updated but generation doesn't change
+				// Also trigger when PendingStartupResume or NodeReadyEventDetectedAt changes
+				// This handles scenarios where status is updated but generation doesn't change
 				oldPolicy, oldOK := e.ObjectOld.(*appsv1alpha1.NamespaceLifecyclePolicy)
 				newPolicy, newOK := e.ObjectNew.(*appsv1alpha1.NamespaceLifecyclePolicy)
 				if oldOK && newOK {
 					// Trigger if PendingStartupResume changed from false to true
 					if !oldPolicy.Status.PendingStartupResume && newPolicy.Status.PendingStartupResume {
 						return true
+					}
+
+					// Trigger if a new node ready event was detected
+					if newPolicy.Status.NodeReadyEventDetectedAt != nil {
+						if oldPolicy.Status.NodeReadyEventDetectedAt == nil ||
+							newPolicy.Status.NodeReadyEventDetectedAt.After(oldPolicy.Status.NodeReadyEventDetectedAt.Time) {
+							return true
+						}
 					}
 				}
 

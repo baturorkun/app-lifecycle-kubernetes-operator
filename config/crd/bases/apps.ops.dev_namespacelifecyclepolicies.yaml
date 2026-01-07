@@ -105,6 +105,33 @@ spec:
                     description: signalChecks defines which signals to monitor and
                       how to respond
                     properties:
+                      checkContainerRestarts:
+                        description: checkContainerRestarts enables monitoring of
+                          container restarts and CrashLoopBackOff states
+                        properties:
+                          enabled:
+                            description: enabled activates container restart checking
+                            type: boolean
+                          restartThreshold:
+                            default: 10
+                            description: |-
+                              restartThreshold is the number of restarts that triggers throttling
+                              Default: 10
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                          slowdownPercent:
+                            default: 50
+                            description: |-
+                              slowdownPercent is the percentage of current batch size to use when restarts exceed threshold
+                              For example, 50 means reduce batch size to 50% of current value
+                              Default: 50
+                            format: int32
+                            maximum: 100
+                            minimum: 10
+                            type: integer
+                        type: object
                       checkNodePressure:
                         description: checkNodePressure enables monitoring of node
                           pressure conditions
@@ -446,6 +473,7 @@ spec:
                           - NodePressure
                           - PendingPods
                           - NodeUsage
+                          - ContainerRestarts
                           type: string
                       type: object
                     type: array
@@ -574,6 +602,16 @@ spec:
                 description: |-
                   message provides a human-readable message about the current status.
                   This field typically contains details about the current operation or any errors encountered.
+                type: string
+              nodeReadyEventDetectedAt:
+                description: NodeReadyEventDetectedAt is the time when a node ready
+                  event was last detected
+                format: date-time
+                type: string
+              nodeReadyEventHandledAt:
+                description: NodeReadyEventHandledAt is the time when the last detected
+                  node ready event was processed
+                format: date-time
                 type: string
               pendingStartupResume:
                 description: |-

@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // workloadItem represents a deployment or statefulset to resume
@@ -44,7 +45,9 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	deployments *appsv1.DeploymentList,
 	statefulSets *appsv1.StatefulSetList,
 ) error {
-	log := ctrl.LoggerFrom(ctx)
+	// Create a clean logger without framework metadata noise (controllerGroup, etc.)
+	log := logf.Log.WithName("adaptive").WithValues("policy", policy.Name)
+	ctx = logf.IntoContext(ctx, log)
 	config := policy.Spec.AdaptiveThrottling
 
 	// Combine all workloads into a single list
@@ -96,7 +99,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	// Process workloads in adaptive batches
 	for resumedCount < totalWorkloads {
 		// 1. Collect signals (cluster-wide)
-		signals, err := r.collectSignals(ctx, config)
+		signals, metrics, err := r.collectSignals(ctx, config)
 		if err != nil {
 			if config.FallbackOnMetricsUnavailable {
 				log.Error(err, "Failed to collect signals, proceeding without throttling")
@@ -111,7 +114,11 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		// 2. Check for critical signals (Node NotReady)
 		if hasSignal(signals, appsv1alpha1.SignalNodeNotReady) {
 			log.Info("🔴 Node(s) NotReady detected, pausing resume",
-				"activeSignals", len(signals))
+				"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
+				"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+				"pending", metrics.PendingPods,
+				"crash", metrics.UnhealthyPods,
+				"signals", getSignalTypes(signals))
 
 			// Update status to show we're waiting
 			if err := r.updateAdaptiveProgress(ctx, policy, resumedCount, totalWorkloads,
@@ -134,9 +141,9 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 		if currentBatchSize != previousBatchSize {
 			log.Info("🐌 Throttling: Adjusted batch size",
-				"from", previousBatchSize,
-				"to", currentBatchSize,
-				"activeSignals", len(signals))
+				"previous", previousBatchSize,
+				"new", currentBatchSize,
+				"signals", getSignalTypes(signals))
 		}
 
 		// 4. Process next batch
@@ -146,10 +153,14 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		}
 		batch := allWorkloads[resumedCount:batchEnd]
 
-		log.Info("📊 Processing batch",
+		log.Info("⚙️ Processing batch",
 			"batchSize", len(batch),
 			"progress", fmt.Sprintf("%d/%d", resumedCount, totalWorkloads),
-			"activeSignals", len(signals))
+			"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
+			"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+			"pending", metrics.PendingPods,
+			"crash", metrics.UnhealthyPods,
+			"signals", getSignalTypes(signals))
 
 		// Update status before processing batch
 		if err := r.updateAdaptiveProgress(ctx, policy, resumedCount, totalWorkloads,
@@ -179,7 +190,11 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 			waitDuration := r.calculateWaitDuration(signals, batchInterval)
 			log.Info("💤 Waiting between batches",
 				"duration", waitDuration,
-				"activeSignals", len(signals))
+				"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
+				"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+				"pending", metrics.PendingPods,
+				"crash", metrics.UnhealthyPods,
+				"signals", getSignalTypes(signals))
 			time.Sleep(waitDuration)
 		}
 	}
@@ -239,6 +254,19 @@ func (r *NamespaceLifecyclePolicyReconciler) calculateBatchSize(
 		return newSize
 	}
 
+	// Check for ContainerRestarts (Warning severity)
+	if hasSignal(signals, appsv1alpha1.SignalContainerRestarts) && config.SignalChecks.CheckContainerRestarts != nil {
+		slowdownPercent := config.SignalChecks.CheckContainerRestarts.SlowdownPercent
+		if slowdownPercent == 0 {
+			slowdownPercent = 50 // default to 50%
+		}
+		newSize := (initialBatchSize * slowdownPercent) / 100
+		if newSize < minBatchSize {
+			newSize = minBatchSize
+		}
+		return newSize
+	}
+
 	// Check for PendingPods (Info severity)
 	if hasSignal(signals, appsv1alpha1.SignalPendingPods) && config.SignalChecks.CheckPendingPods != nil {
 		slowdownPercent := config.SignalChecks.CheckPendingPods.SlowdownPercent
@@ -277,6 +305,11 @@ func (r *NamespaceLifecyclePolicyReconciler) calculateWaitDuration(
 		duration = duration * 3 / 2
 	}
 
+	// If containers are crashing, wait significantly longer to allow recovery
+	if hasSignal(signals, appsv1alpha1.SignalContainerRestarts) {
+		duration = duration * 2
+	}
+
 	return duration
 }
 
@@ -313,7 +346,7 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForSignalClear(
 			return false
 		case <-ticker.C:
 			// Check if signal has cleared (cluster-wide)
-			signals, err := r.collectSignals(ctx, config)
+			signals, metrics, err := r.collectSignals(ctx, config)
 			if err != nil {
 				if config.FallbackOnMetricsUnavailable {
 					log.Error(err, "Failed to collect signals during wait, assuming cleared")
@@ -326,6 +359,10 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForSignalClear(
 			if !hasSignal(signals, signalType) {
 				log.Info("Signal cleared",
 					"signal", signalType,
+					"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
+					"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+					"pending", metrics.PendingPods,
+					"crash", metrics.UnhealthyPods,
 					"waitedSeconds", int(elapsed.Seconds()))
 				return true
 			}
@@ -391,7 +428,20 @@ func (r *NamespaceLifecyclePolicyReconciler) updateAdaptiveProgress(
 	})
 }
 
-// min returns the minimum of two int32 values
+// getSignalTypes returns a list of active signal types as strings
+func getSignalTypes(signals []appsv1alpha1.Signal) []string {
+	types := make([]string, 0, len(signals))
+	seen := make(map[string]bool)
+	for _, s := range signals {
+		typeName := string(s.Type)
+		if !seen[typeName] {
+			types = append(types, typeName)
+			seen[typeName] = true
+		}
+	}
+	return types
+}
+
 func min(a, b int32) int32 {
 	if a < b {
 		return a

@@ -107,6 +107,7 @@ spec:
   #   🟡 Signal 2: Node Pressure (Warning)         - Significantly reduce batch size (default: 50%)
   #   🟢 Signal 3: Node Resource Allocation (Warning) - PROACTIVE reduction before pressure (default: 60%)
   #   🟠 Signal 4: Pending Pods (Info)             - Moderately reduce batch size (default: 70%)
+  #   🟣 Signal 5: Container Restarts (Warning)     - Detects application-level congestion (default: 50%)
   #
   # Use this when you have:
   #   - Limited node resources (small clusters)
@@ -166,6 +167,14 @@ spec:
   #       enabled: true
   #       threshold: 5          # Trigger if more than 5 pods are resource-pending cluster-wide
   #       slowdownPercent: 70   # Reduce batch size to 70% when triggered
+  #
+  #     # Signal 5: Container Restarts (🟣 Warning - SLOW DOWN)
+  #     # CLUSTER-WIDE: Detects pods in CrashLoopBackOff or with high restart counts
+  #     # This helps detect logical congestion (e.g. database overload)
+  #     checkContainerRestarts:
+  #       enabled: true
+  #       restartThreshold: 10  # Trigger if a container restarts 10+ times
+  #       slowdownPercent: 50   # Reduce batch size by 50% when triggered
   #
   #   # Which nodes to monitor
   #   nodeSelector:
