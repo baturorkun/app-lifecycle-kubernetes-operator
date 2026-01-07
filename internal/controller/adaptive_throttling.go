@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -44,6 +45,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	policy *appsv1alpha1.NamespaceLifecyclePolicy,
 	deployments *appsv1.DeploymentList,
 	statefulSets *appsv1.StatefulSetList,
+	isStartupOperation bool,
 ) error {
 	// Create a clean logger without framework metadata noise (controllerGroup, etc.)
 	log := logf.Log.WithName("adaptive").WithValues("policy", policy.Name)
@@ -98,15 +100,69 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 	// Process workloads in adaptive batches
 	for resumedCount < totalWorkloads {
+		// 0. Check for manual override/abort
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+			log.Error(err, "Failed to re-fetch policy to check for manual override")
+		} else {
+			// PRIORITY LOGIC:
+			// 1. Is there a PENDING manual operation?
+			isManualPending := latestPolicy.Spec.OperationId != "" &&
+				latestPolicy.Status.LastHandledOperationId != latestPolicy.Spec.OperationId
+
+			// 2. Should we abort?
+			// - If this is a Startup Resume, ANY pending manual action takes priority.
+			// - If this is a Manual Resume, only a DIFFERENT manual action (new OpId) takes priority.
+			shouldAbort := false
+			reason := ""
+
+			if isManualPending {
+				if isStartupOperation {
+					shouldAbort = true
+					reason = "Manual command takes precedence over Startup Resume"
+				} else if latestPolicy.Spec.OperationId != policy.Spec.OperationId {
+					shouldAbort = true
+					reason = "Newer manual command detected"
+				}
+			}
+
+			// 3. For Manual resumes: also abort if action changed to Freeze (even stale)
+			// But for Startup resumes: ONLY abort if there's a pending action, not on stale freezes.
+			// This allows startup policy to resume even when spec.action was left as Freeze from a previous manual op.
+			if !isStartupOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze && !shouldAbort {
+				shouldAbort = true
+				reason = "Action is now Freeze"
+			}
+
+			if shouldAbort {
+				log.Info("🛑 Manual override detected - aborting active resume process",
+					"reason", reason,
+					"newAction", latestPolicy.Spec.Action,
+					"newOperationId", latestPolicy.Spec.OperationId,
+					"isStartup", isStartupOperation)
+				return fmt.Errorf("operation aborted due to manual override")
+			}
+		}
+
 		// 1. Collect signals (cluster-wide)
 		signals, metrics, err := r.collectSignals(ctx, config)
 		if err != nil {
+			// If context was canceled (shutdown), stop immediately
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			if config.FallbackOnMetricsUnavailable {
 				log.Error(err, "Failed to collect signals, proceeding without throttling")
 				signals = []appsv1alpha1.Signal{} // empty signals, proceed
 			} else {
 				return fmt.Errorf("failed to collect signals: %w", err)
 			}
+		}
+
+		// Double check context after metrics collection
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
 		now := metav1.Now()
@@ -140,9 +196,14 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		currentBatchSize = r.calculateBatchSize(signals, config, currentBatchSize)
 
 		if currentBatchSize != previousBatchSize {
+			actualInitial := config.InitialBatchSize
+			if actualInitial == 0 {
+				actualInitial = 3
+			}
 			log.Info("🐌 Throttling: Adjusted batch size",
 				"previous", previousBatchSize,
 				"new", currentBatchSize,
+				"initialTarget", actualInitial,
 				"signals", getSignalTypes(signals))
 		}
 
@@ -171,13 +232,20 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 		// 5. Resume workloads in this batch
 		for _, workload := range batch {
+			progress := fmt.Sprintf("[%d/%d]", resumedCount+1, totalWorkloads)
 			if workload.IsDeployment {
-				log.Info("Resuming deployment", "name", workload.Name)
+				log.Info("🚀 Resuming deployment",
+					"progress", progress,
+					"name", workload.Name,
+					"batchSize", len(batch))
 				if err := r.resumeDeployment(ctx, workload.Deployment); err != nil {
 					return fmt.Errorf("failed to resume deployment %s: %w", workload.Name, err)
 				}
 			} else {
-				log.Info("Resuming statefulset", "name", workload.Name)
+				log.Info("🚀 Resuming statefulset",
+					"progress", progress,
+					"name", workload.Name,
+					"batchSize", len(batch))
 				if err := r.resumeStatefulSet(ctx, workload.StatefulSet); err != nil {
 					return fmt.Errorf("failed to resume statefulset %s: %w", workload.Name, err)
 				}
@@ -404,6 +472,9 @@ func (r *NamespaceLifecyclePolicyReconciler) updateAdaptiveProgress(
 			return err
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestPolicy.DeepCopy()
+
 		// Update adaptive progress
 		latestPolicy.Status.AdaptiveProgress = &appsv1alpha1.AdaptiveProgressStatus{
 			TotalWorkloads:   totalWorkloads,
@@ -424,7 +495,8 @@ func (r *NamespaceLifecyclePolicyReconciler) updateAdaptiveProgress(
 			"batchSize", currentBatchSize,
 			"signals", len(signals))
 
-		return r.Status().Update(ctx, latestPolicy)
+		// Use Patch for status to be resilient to concurrent updates
+		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 	})
 }
 

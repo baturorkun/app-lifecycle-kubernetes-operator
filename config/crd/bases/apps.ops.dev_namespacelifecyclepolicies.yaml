@@ -197,7 +197,7 @@ spec:
                               Default: 80 (triggers at 80% CPU usage)
                             format: int32
                             maximum: 100
-                            minimum: 50
+                            minimum: 1
                             type: integer
                           enabled:
                             description: enabled activates node usage checking
@@ -210,7 +210,7 @@ spec:
                               Default: 80 (triggers at 80% memory usage)
                             format: int32
                             maximum: 100
-                            minimum: 50
+                            minimum: 1
                             type: integer
                           slowdownPercent:
                             default: 60

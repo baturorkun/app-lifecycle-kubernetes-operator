@@ -339,14 +339,24 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 		nodeSelector = map[string]string{"node-role.kubernetes.io/worker": ""}
 	}
 
-	// List ALL nodes matching selector
+	// List nodes matching selector
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList, client.MatchingLabels(nodeSelector)); err != nil {
 		return signals, maxCPU, maxMem, err
 	}
 
+	// Fallsback: If no worker nodes found (common in local single-node clusters), list ALL nodes
+	if len(nodeList.Items) == 0 {
+		log := logf.FromContext(ctx)
+		log.V(1).Info("No nodes found with worker label, falling back to all nodes")
+		if err := r.List(ctx, nodeList); err != nil {
+			return signals, maxCPU, maxMem, err
+		}
+	}
+
 	// Check EACH NODE separately
 	for _, node := range nodeList.Items {
+		log := logf.FromContext(ctx) // This logger might be framework-polluted, but it's for internal debug
 		// Get node allocatable resources
 		allocatableCPU := node.Status.Allocatable.Cpu()
 		allocatableMemory := node.Status.Allocatable.Memory()
@@ -358,14 +368,14 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 		// Query kubelet for REAL-TIME CPU usage
 		usedCPU, err := r.getNodeCPUUsage(ctx, node.Name)
 		if err != nil {
-			// If kubelet stats unavailable, skip this node
-			// Log error but don't fail the entire signal check
+			log.V(1).Info("Failed to get CPU usage for node", "node", node.Name, "error", err)
 			continue
 		}
 
 		// Query kubelet for REAL-TIME memory usage
 		usedMemory, err := r.getNodeMemoryUsage(ctx, node.Name)
 		if err != nil {
+			log.V(1).Info("Failed to get Memory usage for node", "node", node.Name, "error", err)
 			continue
 		}
 

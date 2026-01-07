@@ -371,7 +371,7 @@ type NodeUsageCheckConfig struct {
 	// Default: 80 (triggers at 80% CPU usage)
 	// +optional
 	// +kubebuilder:default=80
-	// +kubebuilder:validation:Minimum=50
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	CPUThresholdPercent int32 `json:"cpuThresholdPercent,omitempty"`
 
@@ -380,7 +380,7 @@ type NodeUsageCheckConfig struct {
 	// Default: 80 (triggers at 80% memory usage)
 	// +optional
 	// +kubebuilder:default=80
-	// +kubebuilder:validation:Minimum=50
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	MemoryThresholdPercent int32 `json:"memoryThresholdPercent,omitempty"`
 

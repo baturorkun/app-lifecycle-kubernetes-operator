@@ -135,6 +135,9 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 			return nil
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestDeployment.DeepCopy()
+
 		// Store original replica count in annotation
 		if latestDeployment.Annotations == nil {
 			latestDeployment.Annotations = make(map[string]string)
@@ -145,6 +148,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 			originalReplicas = *latestDeployment.Spec.Replicas
 		}
 
+		// Store original replicas and optional properties
 		latestDeployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
 
 		// Handle terminationGracePeriodSeconds override
@@ -161,7 +165,8 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeDeployment(ctx context.Contex
 		zero := int32(0)
 		latestDeployment.Spec.Replicas = &zero
 
-		return r.Update(ctx, latestDeployment)
+		// Use Patch with MergeFrom to be resilient to concurrent status updates
+		return r.Patch(ctx, latestDeployment, client.MergeFrom(patchBase))
 	})
 }
 
@@ -179,6 +184,9 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 			return nil
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestSts.DeepCopy()
+
 		// Store original replica count in annotation
 		if latestSts.Annotations == nil {
 			latestSts.Annotations = make(map[string]string)
@@ -189,6 +197,7 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 			originalReplicas = *latestSts.Spec.Replicas
 		}
 
+		// Store original replicas and optional properties
 		latestSts.Annotations[appsv1alpha1.AnnotationOriginalReplicas] = strconv.Itoa(int(originalReplicas))
 
 		// Handle terminationGracePeriodSeconds override
@@ -205,7 +214,8 @@ func (r *NamespaceLifecyclePolicyReconciler) freezeStatefulSet(ctx context.Conte
 		zero := int32(0)
 		latestSts.Spec.Replicas = &zero
 
-		return r.Update(ctx, latestSts)
+		// Use Patch with MergeFrom to be resilient to concurrent status updates
+		return r.Patch(ctx, latestSts, client.MergeFrom(patchBase))
 	})
 }
 
@@ -216,7 +226,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := deployment.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
 	if !exists {
-		log.Info("Skipping resume: deployment was not frozen",
+		log.V(1).Info("Skipping resume: deployment was not frozen",
 			"deployment", deployment.Name,
 			"namespace", deployment.Namespace,
 			"reason", "Deployment has not been frozen by this operator")
@@ -244,6 +254,9 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 			return nil
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestDeployment.DeepCopy()
+
 		// Restore original replica count
 		replicas := int32(originalReplicas)
 		latestDeployment.Spec.Replicas = &replicas
@@ -264,7 +277,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 		// Remove the annotation
 		delete(latestDeployment.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
 
-		return r.Update(ctx, latestDeployment)
+		// Use Patch with MergeFrom to be resilient to concurrent status updates
+		return r.Patch(ctx, latestDeployment, client.MergeFrom(patchBase))
 	})
 }
 
@@ -275,7 +289,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 	// Check if there's a stored original replica count
 	originalReplicasStr, exists := sts.Annotations[appsv1alpha1.AnnotationOriginalReplicas]
 	if !exists {
-		log.Info("Skipping resume: statefulset was not frozen",
+		log.V(1).Info("Skipping resume: statefulset was not frozen",
 			"statefulset", sts.Name,
 			"namespace", sts.Namespace,
 			"reason", "StatefulSet has not been frozen by this operator")
@@ -303,6 +317,9 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 			return nil
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestSts.DeepCopy()
+
 		// Restore original replica count
 		replicas := int32(originalReplicas)
 		latestSts.Spec.Replicas = &replicas
@@ -323,29 +340,33 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 		// Remove the annotation
 		delete(latestSts.Annotations, appsv1alpha1.AnnotationOriginalReplicas)
 
-		return r.Update(ctx, latestSts)
+		// Use Patch with MergeFrom to be resilient to concurrent status updates
+		return r.Patch(ctx, latestSts, client.MergeFrom(patchBase))
 	})
 }
 
 // updateStatus updates the policy status with phase, message and lastHandledOperationId
 func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string, isStartupOperation bool) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Fetch latest version to avoid optimistic locking errors (the object has been modified)
+		// Fetch latest version
 		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
 			return err
 		}
 
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestPolicy.DeepCopy()
+
 		latestPolicy.Status.Phase = phase
 		latestPolicy.Status.Message = message
 
 		// Only update LastHandledOperationId for user-initiated operations
-		// Startup operations should not update this field to avoid blocking subsequent operations
 		if !isStartupOperation {
 			latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
 		}
 
-		return r.Status().Update(ctx, latestPolicy)
+		// Use Patch for status to be resilient to concurrent updates
+		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 	})
 }
 
@@ -362,15 +383,16 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 
 	// Skip if startup policy is Ignore
 	if policy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyIgnore {
-		policy.Status.LastStartupAction = "SKIPPED_IGNORE"
-		if err := r.Status().Update(ctx, policy); err != nil {
-			log.Error(err, "Failed to update status")
-		}
-		log.Info("Startup policy check: no action needed",
-			"policy", policy.Name,
-			"startupPolicy", "Ignore",
-			"reason", "Policy is set to Ignore")
-		return nil
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+			patchBase := latestPolicy.DeepCopy()
+			latestPolicy.Status.LastStartupAction = "SKIPPED_IGNORE"
+			latestPolicy.Status.LastStartupAt = &now
+			return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+		})
 	}
 
 	// Node readiness check
@@ -405,15 +427,16 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		desiredPhase = appsv1alpha1.PhaseResumed
 		action = appsv1alpha1.LifecycleActionResume
 	default:
-		policy.Status.LastStartupAction = "SKIPPED_UNKNOWN_POLICY"
-		if err := r.Status().Update(ctx, policy); err != nil {
-			log.Error(err, "Failed to update status")
-		}
-		log.Info("Startup policy check: no action needed",
-			"policy", policy.Name,
-			"startupPolicy", policy.Spec.StartupPolicy,
-			"reason", "Unknown startup policy value")
-		return nil
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+			patchBase := latestPolicy.DeepCopy()
+			latestPolicy.Status.LastStartupAction = "SKIPPED_UNKNOWN_POLICY"
+			latestPolicy.Status.LastStartupAt = &now
+			return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+		})
 	}
 
 	// NOTE: We do NOT check if Phase == desiredPhase and skip
@@ -436,6 +459,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				return err
 			}
 
+			// Create a patch helper
+			patchBase := latestPolicy.DeepCopy()
+
 			// Mark as pending startup resume in status
 			latestPolicy.Status.PendingStartupResume = true
 			latestPolicy.Status.StartupResumeDelayStartedAt = &now
@@ -444,7 +470,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			latestPolicy.Status.LastStartupAt = &now
 			latestPolicy.Status.LastStartupAction = "RESUME_DELAYED"
 
-			return r.Status().Update(ctx, latestPolicy)
+			return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 		}); err != nil {
 			log.Error(err, "Failed to update status for delayed startup resume")
 			return err
@@ -523,7 +549,11 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				"policy", policy.Name,
 				"workloads", len(deployments.Items)+len(statefulSets.Items))
 
-			if err := r.resumeWithAdaptiveThrottling(ctx, policy, deployments, statefulSets); err != nil {
+			if err := r.resumeWithAdaptiveThrottling(ctx, policy, deployments, statefulSets, true); err != nil {
+				if err.Error() == "operation aborted due to manual override" {
+					log.Info("🛑 Startup resume aborted due to manual override", "policy", policy.Name)
+					return nil
+				}
 				log.Error(err, "Failed to resume with adaptive throttling during startup")
 				return err
 			}
@@ -669,123 +699,161 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 	// Handle pending startup resume with delay using status fields
 	if policy.Status.PendingStartupResume {
-		if policy.Status.StartupResumeDelayStartedAt == nil {
-			log.Error(fmt.Errorf("missing delay start time"), "Pending startup resume has no start time in status")
-			// Clear the pending flag
-			policy.Status.PendingStartupResume = false
-			if err := r.Status().Update(ctx, &policy); err != nil {
-				log.Error(err, "Failed to clear invalid pending startup resume")
-			}
-			return ctrl.Result{}, nil
-		}
+		// 1. Check for manual operation override during startup delay
+		// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId)
+		// Stale actions (already handled) should not block startup resume.
+		isManualPending := !r.shouldSkipOperation(&policy)
 
-		elapsed := time.Since(policy.Status.StartupResumeDelayStartedAt.Time)
-		if elapsed < policy.Spec.ResumeDelay.Duration {
-			// Delay not yet complete
-			remaining := policy.Spec.ResumeDelay.Duration - elapsed
-			// Log at first check (when elapsed is very small) to show timer started
-			if elapsed < 2*time.Second {
-				log.Info("⏳ Startup resume delay timer started",
-					"totalDelay", policy.Spec.ResumeDelay.Duration,
-					"policy", policy.Name,
-					"targetNamespace", policy.Spec.TargetNamespace)
-			}
-			log.V(1).Info("Startup resume delay in progress",
-				"elapsed", elapsed,
-				"remaining", remaining,
-				"policy", policy.Name)
-			return ctrl.Result{RequeueAfter: remaining}, nil
-		}
+		if isManualPending {
+			log.Info("⚠️ Cancelling startup resume due to pending manual operation",
+				"action", policy.Spec.Action,
+				"operationId", policy.Spec.OperationId)
 
-		// Delay complete! Perform the startup resume now
-		log.Info("🚀 Startup resume delay completed - executing resume",
-			"delay", policy.Spec.ResumeDelay.Duration,
-			"policy", policy.Name,
-			"targetNamespace", policy.Spec.TargetNamespace)
-
-		// Execute the resume operation
-		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-		if err != nil {
-			log.Error(err, "Failed to list deployments for startup resume")
-			return ctrl.Result{}, err
-		}
-
-		statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-		if err != nil {
-			log.Error(err, "Failed to list statefulsets for startup resume")
-			return ctrl.Result{}, err
-		}
-
-		// Check if adaptive throttling is enabled
-		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
-			log.Info("🚀 Executing startup resume with adaptive throttling",
-				"policy", policy.Name,
-				"workloads", len(deployments.Items)+len(statefulSets.Items))
-
-			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
-				log.Error(err, "Failed to resume with adaptive throttling during delayed startup")
+			// Update status to cancel the pending startup resume, but DON'T return
+			// Let Reconcile continue to process the pending manual command
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, req.NamespacedName, latestPolicy); err != nil {
+					return err
+				}
+				patchBase := latestPolicy.DeepCopy()
+				latestPolicy.Status.PendingStartupResume = false
+				latestPolicy.Status.LastStartupAction = "CANCELLED_BY_MANUAL_OVERRIDE"
+				return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+			}); err != nil {
+				log.Error(err, "Failed to cancel pending startup resume")
 				return ctrl.Result{}, err
 			}
+
+			// Re-fetch the policy to get updated status, then continue to process manual command
+			if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
+				return ctrl.Result{}, err
+			}
+			// Don't return - fall through to process the manual command below
 		} else {
-			// Resume without throttling
-			log.Info("⚡ Executing startup resume without throttling",
+			// No manual override - continue with startup resume delay logic
+			if policy.Status.StartupResumeDelayStartedAt == nil {
+				log.Error(fmt.Errorf("missing delay start time"), "Pending startup resume has no start time in status")
+				// Clear the pending flag
+				policy.Status.PendingStartupResume = false
+				if err := r.Status().Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to clear invalid pending startup resume")
+				}
+				return ctrl.Result{}, nil
+			}
+
+			elapsed := time.Since(policy.Status.StartupResumeDelayStartedAt.Time)
+			if elapsed < policy.Spec.ResumeDelay.Duration {
+				// Delay not yet complete
+				remaining := policy.Spec.ResumeDelay.Duration - elapsed
+				// Log at first check (when elapsed is very small) to show timer started
+				if elapsed < 2*time.Second {
+					log.Info("⏳ Startup resume delay timer started",
+						"totalDelay", policy.Spec.ResumeDelay.Duration,
+						"policy", policy.Name,
+						"targetNamespace", policy.Spec.TargetNamespace)
+				}
+				log.V(1).Info("Startup resume delay in progress",
+					"elapsed", elapsed,
+					"remaining", remaining,
+					"policy", policy.Name)
+				return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+
+			// Delay complete! Perform the startup resume now
+			log.Info("🚀 Startup resume delay completed - executing resume",
+				"delay", policy.Spec.ResumeDelay.Duration,
 				"policy", policy.Name,
-				"workloads", len(deployments.Items)+len(statefulSets.Items))
+				"targetNamespace", policy.Spec.TargetNamespace)
 
-			for i := range deployments.Items {
-				deployment := &deployments.Items[i]
-				if err := r.resumeDeployment(ctx, deployment); err != nil {
-					log.Error(err, "Failed to resume deployment during delayed startup", "name", deployment.Name)
+			// Execute the resume operation
+			deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+			if err != nil {
+				log.Error(err, "Failed to list deployments for startup resume")
+				return ctrl.Result{}, err
+			}
+
+			statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+			if err != nil {
+				log.Error(err, "Failed to list statefulsets for startup resume")
+				return ctrl.Result{}, err
+			}
+
+			// Check if adaptive throttling is enabled
+			if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+				log.Info("🚀 Executing startup resume with adaptive throttling",
+					"policy", policy.Name,
+					"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+				if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets, true); err != nil {
+					if err.Error() == "operation aborted due to manual override" {
+						log.Info("🛑 Delayed startup resume aborted due to manual override", "policy", policy.Name)
+						return ctrl.Result{}, nil
+					}
+					log.Error(err, "Failed to resume with adaptive throttling during delayed startup")
+					return ctrl.Result{}, err
+				}
+			} else {
+				// Resume without throttling
+				log.Info("⚡ Executing startup resume without throttling",
+					"policy", policy.Name,
+					"workloads", len(deployments.Items)+len(statefulSets.Items))
+
+				for i := range deployments.Items {
+					deployment := &deployments.Items[i]
+					if err := r.resumeDeployment(ctx, deployment); err != nil {
+						log.Error(err, "Failed to resume deployment during delayed startup", "name", deployment.Name)
+					}
+				}
+				for i := range statefulSets.Items {
+					sts := &statefulSets.Items[i]
+					if err := r.resumeStatefulSet(ctx, sts); err != nil {
+						log.Error(err, "Failed to resume statefulset during delayed startup", "name", sts.Name)
+					}
 				}
 			}
-			for i := range statefulSets.Items {
-				sts := &statefulSets.Items[i]
-				if err := r.resumeStatefulSet(ctx, sts); err != nil {
-					log.Error(err, "Failed to resume statefulset during delayed startup", "name", sts.Name)
+
+			// Update status with retry on conflict
+			now := metav1.Now()
+			policy.Status.Phase = appsv1alpha1.PhaseResumed
+			policy.Status.Message = "Startup resume completed after delay"
+			policy.Status.LastResumeAt = &now
+			policy.Status.LastStartupAction = "RESUME_APPLIED"
+			policy.Status.PendingStartupResume = false // Clear the pending flag
+
+			// NOTE: Do NOT set LastHandledOperationId here!
+			// Startup policy is independent of manual operations (spec.action/operationId)
+
+			// Use retry to handle conflicts (adaptive throttling may have updated status)
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				// Fetch latest version
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+					return err
 				}
+
+				// Apply status changes to latest version
+				latestPolicy.Status.Phase = policy.Status.Phase
+				latestPolicy.Status.Message = policy.Status.Message
+				latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
+				latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+				// Do NOT copy LastHandledOperationId - startup ops don't consume operationId
+				latestPolicy.Status.PendingStartupResume = false // Clear the pending flag
+
+				// Copy adaptive progress if set
+				if policy.Status.AdaptiveProgress != nil {
+					latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
+				}
+
+				return r.Status().Update(ctx, latestPolicy)
+			}); err != nil {
+				log.Error(err, "Failed to update status after delayed startup resume")
+				return ctrl.Result{}, err
 			}
+
+			log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
+			return ctrl.Result{}, nil
 		}
-
-		// Update status with retry on conflict
-		now := metav1.Now()
-		policy.Status.Phase = appsv1alpha1.PhaseResumed
-		policy.Status.Message = "Startup resume completed after delay"
-		policy.Status.LastResumeAt = &now
-		policy.Status.LastStartupAction = "RESUME_APPLIED"
-		policy.Status.PendingStartupResume = false // Clear the pending flag
-
-		// NOTE: Do NOT set LastHandledOperationId here!
-		// Startup policy is independent of manual operations (spec.action/operationId)
-
-		// Use retry to handle conflicts (adaptive throttling may have updated status)
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			// Fetch latest version
-			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
-				return err
-			}
-
-			// Apply status changes to latest version
-			latestPolicy.Status.Phase = policy.Status.Phase
-			latestPolicy.Status.Message = policy.Status.Message
-			latestPolicy.Status.LastResumeAt = policy.Status.LastResumeAt
-			latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
-			// Do NOT copy LastHandledOperationId - startup ops don't consume operationId
-			latestPolicy.Status.PendingStartupResume = false // Clear the pending flag
-
-			// Copy adaptive progress if set
-			if policy.Status.AdaptiveProgress != nil {
-				latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
-			}
-
-			return r.Status().Update(ctx, latestPolicy)
-		}); err != nil {
-			log.Error(err, "Failed to update status after delayed startup resume")
-			return ctrl.Result{}, err
-		}
-
-		log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
-		return ctrl.Result{}, nil
 	}
 
 	// Check if this operation was already handled
@@ -991,7 +1059,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				"deployments", len(deployments.Items),
 				"statefulsets", len(statefulSets.Items))
 
-			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets); err != nil {
+			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets, false); err != nil {
+				if err.Error() == "operation aborted due to manual override" {
+					log.Info("🛑 Manual resume aborted due to subsequent manual override", "policy", policy.Name)
+					return ctrl.Result{}, nil
+				}
 				log.Error(err, "Failed to resume with adaptive throttling")
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
 					fmt.Sprintf("Failed to resume: %v", err), false); err != nil {
@@ -1408,6 +1480,9 @@ func (r *NamespaceLifecyclePolicyReconciler) performBalancing(ctx context.Contex
 func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestart(ctx context.Context, deployment *appsv1.Deployment) error {
 	log := logf.FromContext(ctx)
 
+	// Create a patch helper
+	patchBase := deployment.DeepCopy()
+
 	if deployment.Spec.Template.Annotations == nil {
 		deployment.Spec.Template.Annotations = make(map[string]string)
 	}
@@ -1418,12 +1493,15 @@ func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestart(ctx context.C
 		"deployment", deployment.Name,
 		"namespace", deployment.Namespace)
 
-	return r.Update(ctx, deployment)
+	return r.Patch(ctx, deployment, client.MergeFrom(patchBase))
 }
 
 // triggerRollingRestartSts updates statefulset pod template annotation to trigger rolling update
 func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestartSts(ctx context.Context, sts *appsv1.StatefulSet) error {
 	log := logf.FromContext(ctx)
+
+	// Create a patch helper
+	patchBase := sts.DeepCopy()
 
 	if sts.Spec.Template.Annotations == nil {
 		sts.Spec.Template.Annotations = make(map[string]string)
@@ -1435,7 +1513,7 @@ func (r *NamespaceLifecyclePolicyReconciler) triggerRollingRestartSts(ctx contex
 		"statefulset", sts.Name,
 		"namespace", sts.Namespace)
 
-	return r.Update(ctx, sts)
+	return r.Patch(ctx, sts, client.MergeFrom(patchBase))
 }
 
 // SetupWithManager sets up the controller with the Manager.

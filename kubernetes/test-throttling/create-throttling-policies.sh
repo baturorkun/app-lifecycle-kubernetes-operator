@@ -114,7 +114,7 @@ spec:
       # Monitors real-time CPU/memory usage from kubelet (~10s lag)
       checkNodeUsage:
         enabled: true
-        cpuThresholdPercent: 80
+        cpuThresholdPercent: 40
         memoryThresholdPercent: 80
         slowdownPercent: 60
 
