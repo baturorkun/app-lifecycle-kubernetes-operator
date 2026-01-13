@@ -144,8 +144,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 			}
 		}
 
-		// 1. Collect signals (cluster-wide)
-		signals, metrics, err := r.collectSignals(ctx, config)
+		// 1. Collect signals (targetNamespace-scoped for container restarts)
+		signals, metrics, err := r.collectSignals(ctx, config, policy.Spec.TargetNamespace)
 		if err != nil {
 			// If context was canceled (shutdown), stop immediately
 			if ctx.Err() != nil {
@@ -200,11 +200,21 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 			if actualInitial == 0 {
 				actualInitial = 3
 			}
-			log.Info("🐌 Throttling: Adjusted batch size",
-				"previous", previousBatchSize,
-				"new", currentBatchSize,
-				"initialTarget", actualInitial,
-				"signals", getSignalTypes(signals))
+
+			// Add unique keyword for slowdown detection
+			if currentBatchSize < previousBatchSize {
+				log.Info("🐌 SLOWDOWN_DETECTED: Batch size reduced due to signals",
+					"previous", previousBatchSize,
+					"new", currentBatchSize,
+					"initialTarget", actualInitial,
+					"signals", getSignalTypes(signals))
+			} else {
+				log.Info("🐌 Throttling: Adjusted batch size",
+					"previous", previousBatchSize,
+					"new", currentBatchSize,
+					"initialTarget", actualInitial,
+					"signals", getSignalTypes(signals))
+			}
 		}
 
 		// 4. Process next batch
@@ -276,7 +286,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	// Final status update - show completion with clear messages
 	finalCheckTime := metav1.Now()
 	finalMessage := fmt.Sprintf("All workloads resumed successfully (%d/%d completed)", totalWorkloads, totalWorkloads)
-	
+
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Fetch latest version
 		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
@@ -454,8 +464,8 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForSignalClear(
 			log.Info("Context cancelled while waiting for signal to clear")
 			return false
 		case <-ticker.C:
-			// Check if signal has cleared (cluster-wide)
-			signals, metrics, err := r.collectSignals(ctx, config)
+			// Check if signal has cleared (targetNamespace-scoped for container restarts)
+			signals, metrics, err := r.collectSignals(ctx, config, policy.Spec.TargetNamespace)
 			if err != nil {
 				if config.FallbackOnMetricsUnavailable {
 					log.Error(err, "Failed to collect signals during wait, assuming cleared")

@@ -102,12 +102,12 @@ spec:
   # ============================================================================
 
   # adaptiveThrottling enables CPU-aware, adaptive batched resume to prevent node overload.
-  # The operator monitors 4 levels of signals and adjusts resume speed accordingly:
+  # The operator monitors 5 levels of signals and adjusts resume speed accordingly:
   #   🔴 Signal 1: Node NotReady (Critical)        - STOP all resume operations and wait
   #   🟡 Signal 2: Node Pressure (Warning)         - Significantly reduce batch size (default: 50%)
   #   🟢 Signal 3: Node Resource Allocation (Warning) - PROACTIVE reduction before pressure (default: 60%)
   #   🟠 Signal 4: Pending Pods (Info)             - Moderately reduce batch size (default: 70%)
-  #   🟣 Signal 5: Container Restarts (Warning)     - Detects application-level congestion (default: 50%)
+  #   🟣 Signal 5: Container Restarts (Warning)     - Detects application-level congestion in targetNamespace (default: 50%)
   #
   # Use this when you have:
   #   - Limited node resources (small clusters)
@@ -169,11 +169,12 @@ spec:
   #       slowdownPercent: 70   # Reduce batch size to 70% when triggered
   #
   #     # Signal 5: Container Restarts (🟣 Warning - SLOW DOWN)
-  #     # CLUSTER-WIDE: Detects pods in CrashLoopBackOff or with high restart counts
-  #     # This helps detect logical congestion (e.g. database overload)
+  #     # TARGET-NAMESPACE: Detects pods in CrashLoopBackOff or with high restart counts
+  #     # Only checks pods in the targetNamespace (not cluster-wide)
+  #     # This helps detect logical congestion in your application namespace (e.g. database overload)
   #     checkContainerRestarts:
   #       enabled: true
-  #       restartThreshold: 10  # Trigger if a container restarts 10+ times
+  #       restartThreshold: 10  # Trigger if a container restarts 10+ times in targetNamespace
   #       slowdownPercent: 50   # Reduce batch size by 50% when triggered
   #
   #   # Which nodes to monitor

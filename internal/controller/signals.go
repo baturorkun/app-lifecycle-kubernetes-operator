@@ -54,6 +54,7 @@ type ThrottlingMetrics struct {
 func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 	ctx context.Context,
 	config *appsv1alpha1.AdaptiveThrottlingConfig,
+	targetNamespace string,
 ) ([]appsv1alpha1.Signal, ThrottlingMetrics, error) {
 	signals := []appsv1alpha1.Signal{}
 	metrics := ThrottlingMetrics{}
@@ -110,9 +111,9 @@ func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 		metrics.MaxMemPercent = maxMem
 	}
 
-	// Sinyal 5: Container Restarts kontrolü (Global / Cluster-wide)
+	// Sinyal 5: Container Restarts kontrolü (only in targetNamespace)
 	if config.SignalChecks.CheckContainerRestarts != nil && config.SignalChecks.CheckContainerRestarts.Enabled {
-		restartSignals, unhealthyCount, err := r.checkContainerRestarts(ctx, config.SignalChecks.CheckContainerRestarts.RestartThreshold)
+		restartSignals, unhealthyCount, err := r.checkContainerRestarts(ctx, targetNamespace, config.SignalChecks.CheckContainerRestarts.RestartThreshold)
 		if err != nil {
 			return signals, metrics, fmt.Errorf("failed to check container restarts: %w", err)
 		}
@@ -265,16 +266,18 @@ func (r *NamespaceLifecyclePolicyReconciler) checkPendingPods(
 }
 
 // checkContainerRestarts checks if any pods are in CrashLoopBackOff or have high restart counts
+// Only checks pods in the targetNamespace
 func (r *NamespaceLifecyclePolicyReconciler) checkContainerRestarts(
 	ctx context.Context,
+	targetNamespace string,
 	threshold int32,
 ) ([]appsv1alpha1.Signal, int32, error) {
 	signals := []appsv1alpha1.Signal{}
 	unhealthyCount := int32(0)
 
-	// List ALL pods in the cluster (cluster-wide)
+	// List pods only in the targetNamespace
 	podList := &corev1.PodList{}
-	if err := r.List(ctx, podList); err != nil {
+	if err := r.List(ctx, podList, client.InNamespace(targetNamespace)); err != nil {
 		return signals, unhealthyCount, err
 	}
 
@@ -309,7 +312,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkContainerRestarts(
 
 	if len(signals) > 0 {
 		log := logf.FromContext(ctx)
-		log.V(1).Info("Container restarts check result", "count", len(signals), "threshold", threshold)
+		log.V(1).Info("Container restarts check result", "namespace", targetNamespace, "count", len(signals), "threshold", threshold)
 	}
 
 	return signals, unhealthyCount, nil
@@ -368,15 +371,21 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 		// Query kubelet for REAL-TIME CPU usage
 		usedCPU, err := r.getNodeCPUUsage(ctx, node.Name)
 		if err != nil {
-			log.V(1).Info("Failed to get CPU usage for node", "node", node.Name, "error", err)
+			log.Info("⚠️ Failed to get CPU usage for node", "node", node.Name, "error", err)
 			continue
+		}
+		if usedCPU == 0 {
+			log.Info("⚠️ CPU usage is 0 for node (possible RKE2 issue)", "node", node.Name)
 		}
 
 		// Query kubelet for REAL-TIME memory usage
 		usedMemory, err := r.getNodeMemoryUsage(ctx, node.Name)
 		if err != nil {
-			log.V(1).Info("Failed to get Memory usage for node", "node", node.Name, "error", err)
+			log.Info("⚠️ Failed to get Memory usage for node", "node", node.Name, "error", err)
 			continue
+		}
+		if usedMemory == 0 {
+			log.Info("⚠️ Memory usage is 0 for node (possible RKE2 issue)", "node", node.Name)
 		}
 
 		// Calculate REAL usage percentages
@@ -433,12 +442,25 @@ func (r *NamespaceLifecyclePolicyReconciler) getNodeCPUUsage(
 	// Parse JSON response
 	var stats KubeletStatsResponse
 	if err := json.Unmarshal(rawBody, &stats); err != nil {
+		// Log first 500 chars of response for debugging RKE2 issues
+		responsePreview := string(rawBody)
+		if len(responsePreview) > 500 {
+			responsePreview = responsePreview[:500] + "..."
+		}
+		log := logf.FromContext(ctx)
+		log.Info("⚠️ Failed to parse kubelet stats response", "node", nodeName, "responsePreview", responsePreview, "error", err)
 		return 0, fmt.Errorf("failed to parse kubelet stats: %w", err)
 	}
 
 	// Convert nanocores to millicores
 	// 1 core = 1,000,000,000 nanocores = 1,000 millicores
 	usageMillicores := int64(stats.Node.CPU.UsageNanoCores / 1000000)
+	
+	// Debug: Log if usage is 0 (common in RKE2)
+	if usageMillicores == 0 {
+		log := logf.FromContext(ctx)
+		log.V(1).Info("CPU usage is 0 from kubelet stats", "node", nodeName, "usageNanoCores", stats.Node.CPU.UsageNanoCores)
+	}
 
 	return usageMillicores, nil
 }
@@ -466,10 +488,25 @@ func (r *NamespaceLifecyclePolicyReconciler) getNodeMemoryUsage(
 
 	var stats KubeletStatsResponse
 	if err := json.Unmarshal(rawBody, &stats); err != nil {
+		// Log first 500 chars of response for debugging RKE2 issues
+		responsePreview := string(rawBody)
+		if len(responsePreview) > 500 {
+			responsePreview = responsePreview[:500] + "..."
+		}
+		log := logf.FromContext(ctx)
+		log.Info("⚠️ Failed to parse kubelet stats response", "node", nodeName, "responsePreview", responsePreview, "error", err)
 		return 0, fmt.Errorf("failed to parse kubelet stats: %w", err)
 	}
 
-	return int64(stats.Node.Memory.UsageBytes), nil
+	memoryBytes := int64(stats.Node.Memory.UsageBytes)
+	
+	// Debug: Log if usage is 0 (common in RKE2)
+	if memoryBytes == 0 {
+		log := logf.FromContext(ctx)
+		log.V(1).Info("Memory usage is 0 from kubelet stats", "node", nodeName, "usageBytes", stats.Node.Memory.UsageBytes)
+	}
+
+	return memoryBytes, nil
 }
 
 // hasSignal checks if a specific signal type exists in the signal list
