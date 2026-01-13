@@ -577,6 +577,11 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			}
 		}
 		policy.Status.Phase = appsv1alpha1.PhaseResumed
+		// Set final message - will be updated by adaptive throttling if enabled, otherwise use this
+		if policy.Status.Message == "" {
+			policy.Status.Message = fmt.Sprintf("Startup resume completed successfully (%d deployments, %d statefulsets)",
+				len(deployments.Items), len(statefulSets.Items))
+		}
 		policy.Status.LastResumeAt = &now
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
 		// NOTE: Do NOT set LastHandledOperationId here!
@@ -606,6 +611,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 
 		// Copy adaptive progress if set (from adaptive throttling resume)
+		// Adaptive throttling already updated this with final completion status
 		if policy.Status.AdaptiveProgress != nil {
 			latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
 		}
@@ -816,7 +822,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			// Update status with retry on conflict
 			now := metav1.Now()
 			policy.Status.Phase = appsv1alpha1.PhaseResumed
-			policy.Status.Message = "Startup resume completed after delay"
+			// Set final message - will be updated by adaptive throttling if enabled, otherwise use this
+			if policy.Status.Message == "" {
+				policy.Status.Message = fmt.Sprintf("Startup resume completed after delay (%d deployments, %d statefulsets)",
+					len(deployments.Items), len(statefulSets.Items))
+			}
 			policy.Status.LastResumeAt = &now
 			policy.Status.LastStartupAction = "RESUME_APPLIED"
 			policy.Status.PendingStartupResume = false // Clear the pending flag
@@ -840,7 +850,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				// Do NOT copy LastHandledOperationId - startup ops don't consume operationId
 				latestPolicy.Status.PendingStartupResume = false // Clear the pending flag
 
-				// Copy adaptive progress if set
+				// Copy adaptive progress if set (from adaptive throttling resume)
+				// Adaptive throttling already updated this with final completion status
 				if policy.Status.AdaptiveProgress != nil {
 					latestPolicy.Status.AdaptiveProgress = policy.Status.AdaptiveProgress
 				}

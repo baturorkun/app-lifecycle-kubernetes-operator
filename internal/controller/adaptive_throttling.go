@@ -273,6 +273,47 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		"totalWorkloads", totalWorkloads,
 		"duration", elapsed)
 
+	// Final status update - show completion with clear messages
+	finalCheckTime := metav1.Now()
+	finalMessage := fmt.Sprintf("All workloads resumed successfully (%d/%d completed)", totalWorkloads, totalWorkloads)
+	
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Fetch latest version
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      policy.Name,
+			Namespace: policy.Namespace,
+		}, latestPolicy); err != nil {
+			return err
+		}
+
+		// Create a patch helper based on the current state BEFORE our changes
+		patchBase := latestPolicy.DeepCopy()
+
+		// Update adaptive progress with final completion status
+		latestPolicy.Status.AdaptiveProgress = &appsv1alpha1.AdaptiveProgressStatus{
+			TotalWorkloads:   totalWorkloads,
+			ResumedWorkloads: totalWorkloads, // All workloads completed
+			CurrentBatchSize: currentBatchSize,
+			ActiveSignals:    []appsv1alpha1.Signal{}, // No active signals
+			LastCheckTime:    &finalCheckTime,
+			Message:          finalMessage,
+		}
+
+		// Update root message to show completion
+		latestPolicy.Status.Message = finalMessage
+
+		log.V(1).Info("Updating final adaptive progress",
+			"resumed", totalWorkloads,
+			"total", totalWorkloads)
+
+		// Use Patch for status to be resilient to concurrent updates
+		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+	}); err != nil {
+		log.Error(err, "Failed to update final adaptive progress")
+		// Don't return error - resume is complete
+	}
+
 	return nil
 }
 
