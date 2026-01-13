@@ -1536,6 +1536,15 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 						return true
 					}
 
+					// Trigger if PendingStartupResume is true and the delay start time changed
+					// This is crucial for operator restarts where ApplyStartupPolicy resets this timestamp
+					if newPolicy.Status.PendingStartupResume && newPolicy.Status.StartupResumeDelayStartedAt != nil {
+						if oldPolicy.Status.StartupResumeDelayStartedAt == nil ||
+							!newPolicy.Status.StartupResumeDelayStartedAt.Equal(oldPolicy.Status.StartupResumeDelayStartedAt) {
+							return true
+						}
+					}
+
 					// Trigger if a new node ready event was detected
 					if newPolicy.Status.NodeReadyEventDetectedAt != nil {
 						if oldPolicy.Status.NodeReadyEventDetectedAt == nil ||
@@ -1549,11 +1558,13 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 				return false
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
-				// Do NOT reconcile on create events
-				// Reason: When operator starts, informer sync generates create events for ALL existing CRs
-				// This would trigger reconcile for CRs that were already handled (operationId already processed)
-				// Startup policy is handled by startup runnable, not by create events
-				// For new CRs created while operator is running, update event will trigger reconcile anyway
+				// Reconcile on create events IF there is a pending startup resume
+				// This ensures that after operator restart, policies already in PendingStartupResume
+				// state are enqueued for reconciliation to start the delay timer.
+				policy, ok := e.Object.(*appsv1alpha1.NamespaceLifecyclePolicy)
+				if ok && policy.Status.PendingStartupResume {
+					return true
+				}
 				return false
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
