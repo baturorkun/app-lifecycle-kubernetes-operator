@@ -102,9 +102,10 @@ Prevents cluster congestion when resuming many workloads at once:
   - **NodeUsage**: High CPU or Memory usage on any node
   - **PendingPods**: Total number of pods in Pending state across the cluster
   - **NodeNotReady**: Presence of NotReady worker nodes
-  - **ContainerRestarts**: Detection of high restart counts or `CrashLoopBackOff` pods
+  - **ContainerRestarts**: Detection of high restart counts or `CrashLoopBackOff` pods (scoped to target namespace)
 - **Intelligent Wait**: Adjusts wait time between batches based on active signals
 - **Log Transparency**: Throttling logs include real-time metrics (CPU%, Mem%, Pending count, Crash count)
+- **Custom Metrics Sources**: For environments where kubelet stats API is unavailable (e.g., RKE2), configure alternative metrics endpoints with JSON path parsing
 
 Example:
 ```yaml
@@ -569,6 +570,81 @@ spec:
   startupPolicy: Ignore
 ```
 
+## Custom Metrics Sources (RKE2 / Alternative Endpoints)
+
+In some Kubernetes distributions (e.g., RKE2), the kubelet stats API may not be accessible or may return zero values. The operator supports custom metrics endpoints with JSON path parsing.
+
+### Using Custom Metrics Server
+
+1. **Start the metrics server on your host:**
+   ```bash
+   python3 kubernetes/metrics.py 9090
+   ```
+
+2. **Find your host IP (if needed):**
+   - If using Kind with Podman/Docker, `host.containers.internal` may not work correctly
+   - Use the helper script from within a Kind container:
+     ```bash
+     kubectl run -it --rm debug --image=busybox --restart=Never -- sh
+     # Inside the container:
+     ./kubernetes/get-host-ip.sh
+     ```
+   - Or manually find your host IP:
+     ```bash
+     # On macOS/Linux:
+     ip addr show | grep 'inet ' | grep -v '127.0.0.1'
+     ```
+
+3. **Configure the policy with scrape settings:**
+   ```yaml
+   spec:
+     adaptiveThrottling:
+       signalChecks:
+         checkNodeUsage:
+           enabled: true
+           cpuThresholdPercent: 40
+           memoryThresholdPercent: 80
+           slowdownPercent: 60
+           scrape:
+             source: "http://192.168.127.2:9090/metrics"  # Your host IP
+             cpu: "cpu_usages.percentage"
+             mem: "memory_usages.percentage"
+   ```
+
+### Metrics Server Endpoints
+
+The `metrics.py` server provides:
+- `GET /metrics` - Returns CPU and memory usage percentages as JSON
+- `GET /health` - Health check endpoint
+- `GET /` - Same as `/metrics` (root endpoint)
+
+Example response:
+```json
+{
+  "cpu_usages": {
+    "percentage": 75.5
+  },
+  "memory_usages": {
+    "percentage": 68.2
+  }
+}
+```
+
+### JSON Path Configuration
+
+The `cpu` and `mem` fields use dot-separated JSON paths to extract values from the response:
+- `cpu_usages.percentage` extracts the value at `response.cpu_usages.percentage`
+- `memory_usages.percentage` extracts the value at `response.memory_usages.percentage`
+
+The extracted values should be percentages (0-100).
+
+### Kind + Podman Setup
+
+When Kind runs inside a Podman container:
+- `host.containers.internal` may point to the Kind container, not the actual host
+- Use the actual host IP address (e.g., `192.168.127.2`) instead
+- The `get-host-ip.sh` script can help identify the correct IP from within the cluster
+
 ## Troubleshooting
 
 **Policy not taking effect:**
@@ -585,6 +661,13 @@ spec:
 - Verify `startupPolicy` is set (required field)
 - Check `lastStartupAt` and `lastStartupAction` in status
 - Operator only checks on startup, not during runtime
+
+**CPU/Memory metrics showing 0 (RKE2 or similar):**
+- Check if kubelet stats API is accessible: `kubectl get --raw /api/v1/nodes/<node>/proxy/stats/summary`
+- If unavailable, configure custom metrics source using `scrape` configuration
+- Ensure metrics server is running and accessible from cluster
+- Verify JSON paths match your metrics server response structure
+- Check operator logs for scrape source information and any errors
 
 ## Contributing
 

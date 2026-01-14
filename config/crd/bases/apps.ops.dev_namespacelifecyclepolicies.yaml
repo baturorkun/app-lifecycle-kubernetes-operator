@@ -212,6 +212,33 @@ spec:
                             maximum: 100
                             minimum: 1
                             type: integer
+                          scrape:
+                            description: |-
+                              scrape defines alternative metrics source configuration
+                              If not specified or source is "kubelet", uses kubelet stats API
+                              If source is a URL, fetches JSON from that URL and extracts values using cpu/mem paths
+                            properties:
+                              cpu:
+                                description: |-
+                                  cpu is the JSON path to extract CPU usage percentage from the response
+                                  Example: "cpu_usages.percentage" or "metrics.cpu.usage"
+                                  Only used when source is a URL
+                                type: string
+                              mem:
+                                description: |-
+                                  mem is the JSON path to extract memory usage percentage from the response
+                                  Example: "memory_usages.percentage" or "metrics.memory.usage"
+                                  Only used when source is a URL
+                                type: string
+                              source:
+                                default: kubelet
+                                description: |-
+                                  source is either "kubelet" (default) or a port+path pattern (e.g., ":9090/metrics")
+                                  When using port+path pattern, requests will be sent to each worker node's IP address
+                                  Example: ":9090/metrics" will send requests to http://{node-ip}:9090/metrics for each node
+                                  Default: "kubelet"
+                                type: string
+                            type: object
                           slowdownPercent:
                             default: 60
                             description: |-

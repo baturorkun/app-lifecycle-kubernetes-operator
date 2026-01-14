@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	appsv1alpha1 "github.com/baturorkun/app-lifecycle-kubernetes-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -38,6 +40,23 @@ type KubeletStatsResponse struct {
 			UsageBytes uint64 `json:"usageBytes"`
 		} `json:"memory"`
 	} `json:"node"`
+}
+
+// getNodeIP extracts the IP address from a Node object
+// Prefers InternalIP, falls back to ExternalIP
+func getNodeIP(node *corev1.Node) (string, error) {
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeInternalIP {
+			return addr.Address, nil
+		}
+	}
+	// Fallback to ExternalIP if InternalIP not available
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeExternalIP {
+			return addr.Address, nil
+		}
+	}
+	return "", fmt.Errorf("no IP address found for node %s", node.Name)
 }
 
 // ThrottlingMetrics contains raw values from various checks for logging purposes
@@ -97,11 +116,16 @@ func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 
 	// Sinyal 4: Node Usage kontrolü (PROACTIVE - real-time kubelet metrics)
 	if config.SignalChecks.CheckNodeUsage != nil && config.SignalChecks.CheckNodeUsage.Enabled {
+		var scrapeConfig *appsv1alpha1.MetricsScrapeConfig
+		if config.SignalChecks.CheckNodeUsage.Scrape != nil {
+			scrapeConfig = config.SignalChecks.CheckNodeUsage.Scrape
+		}
 		usageSignals, maxCPU, maxMem, err := r.checkNodeUsage(
 			ctx,
 			config.NodeSelector,
 			config.SignalChecks.CheckNodeUsage.CPUThresholdPercent,
 			config.SignalChecks.CheckNodeUsage.MemoryThresholdPercent,
+			scrapeConfig,
 		)
 		if err != nil {
 			return signals, metrics, fmt.Errorf("failed to check node usage: %w", err)
@@ -318,12 +342,13 @@ func (r *NamespaceLifecyclePolicyReconciler) checkContainerRestarts(
 	return signals, unhealthyCount, nil
 }
 
-// checkNodeUsage checks real-time CPU/Memory usage from kubelet
+// checkNodeUsage checks real-time CPU/Memory usage from kubelet or alternative source
 func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 	ctx context.Context,
 	nodeSelector map[string]string,
 	cpuThreshold int32,
 	memoryThreshold int32,
+	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
 ) ([]appsv1alpha1.Signal, int32, int32, error) {
 	signals := []appsv1alpha1.Signal{}
 	maxCPU := int32(0)
@@ -368,29 +393,69 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 			continue // Skip if resources not available
 		}
 
-		// Query kubelet for REAL-TIME CPU usage
-		usedCPU, err := r.getNodeCPUUsage(ctx, node.Name)
-		if err != nil {
-			log.Info("⚠️ Failed to get CPU usage for node", "node", node.Name, "error", err)
-			continue
-		}
-		if usedCPU == 0 {
-			log.Info("⚠️ CPU usage is 0 for node (possible RKE2 issue)", "node", node.Name)
+		// Determine if we're using URL source (percentage values) or kubelet (raw values)
+		isURLSource := false
+		if scrapeConfig != nil && scrapeConfig.Source != "" && scrapeConfig.Source != "kubelet" {
+			isURLSource = true
 		}
 
-		// Query kubelet for REAL-TIME memory usage
-		usedMemory, err := r.getNodeMemoryUsage(ctx, node.Name)
-		if err != nil {
-			log.Info("⚠️ Failed to get Memory usage for node", "node", node.Name, "error", err)
-			continue
-		}
-		if usedMemory == 0 {
-			log.Info("⚠️ Memory usage is 0 for node (possible RKE2 issue)", "node", node.Name)
-		}
+		var cpuPercent, memoryPercent int32
 
-		// Calculate REAL usage percentages
-		cpuPercent := int32((usedCPU * 100) / allocatableCPU.MilliValue())
-		memoryPercent := int32((usedMemory * 100) / allocatableMemory.Value())
+		if isURLSource {
+			// URL source: Get node IP and fetch metrics from node's IP
+			nodeIP, err := getNodeIP(&node)
+			if err != nil {
+				log.Info("⚠️ Skipping node - failed to get IP", "node", node.Name, "error", err)
+				continue // Skip this node, don't include in check
+			}
+
+			// Fetch CPU usage from node's IP
+			cpuPercentFloat, err := r.getNodeCPUUsageFromURL(ctx, &node, scrapeConfig.Source, scrapeConfig)
+			if err != nil {
+				log.Info("⚠️ Skipping node - failed to get CPU usage from URL", "node", node.Name, "nodeIP", nodeIP, "source", scrapeConfig.Source, "error", err)
+				continue // Skip this node, don't include in check
+			}
+			cpuPercent = int32(cpuPercentFloat)
+
+			// Fetch Memory usage from node's IP
+			memPercentFloat, err := r.getNodeMemoryUsageFromURL(ctx, &node, scrapeConfig.Source, scrapeConfig)
+			if err != nil {
+				log.Info("⚠️ Skipping node - failed to get Memory usage from URL", "node", node.Name, "nodeIP", nodeIP, "source", scrapeConfig.Source, "error", err)
+				continue // Skip this node, don't include in check
+			}
+			memoryPercent = int32(memPercentFloat)
+
+			// Log successful fetch with both CPU and Memory together
+			log.Info("✅ Successfully scraped metrics from URL for node",
+				"node", node.Name,
+				"nodeIP", nodeIP,
+				"cpuPercent", cpuPercent,
+				"memPercent", memoryPercent,
+				"source", scrapeConfig.Source)
+		} else {
+			// Kubelet source returns raw values (millicores/bytes)
+			usedCPU, err := r.getNodeCPUUsage(ctx, node.Name, scrapeConfig)
+			if err != nil {
+				log.Info("⚠️ Failed to get CPU usage for node", "node", node.Name, "error", err)
+				continue
+			}
+			if usedCPU == 0 {
+				log.Info("⚠️ CPU usage is 0 for node (possible RKE2 issue)", "node", node.Name)
+			}
+
+			usedMemory, err := r.getNodeMemoryUsage(ctx, node.Name, scrapeConfig)
+			if err != nil {
+				log.Info("⚠️ Failed to get Memory usage for node", "node", node.Name, "error", err)
+				continue
+			}
+			if usedMemory == 0 {
+				log.Info("⚠️ Memory usage is 0 for node (possible RKE2 issue)", "node", node.Name)
+			}
+
+			// Calculate REAL usage percentages from raw values
+			cpuPercent = int32((usedCPU * 100) / allocatableCPU.MilliValue())
+			memoryPercent = int32((usedMemory * 100) / allocatableMemory.Value())
+		}
 
 		// Track max values
 		if cpuPercent > maxCPU {
@@ -416,12 +481,16 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 
 // getNodeCPUUsage queries kubelet stats API to get real-time CPU usage
 // Returns CPU usage in millicores (e.g., 1500 = 1.5 CPU cores)
+// Note: URL sources are handled directly in checkNodeUsage
 func (r *NamespaceLifecyclePolicyReconciler) getNodeCPUUsage(
 	ctx context.Context,
 	nodeName string,
+	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
 ) (int64, error) {
-	// Use Kubernetes API server proxy to kubelet
-	// This is more secure than direct kubelet access
+	log := logf.FromContext(ctx)
+
+	// Use Kubernetes API server proxy to kubelet (default behavior)
+	log.V(1).Info("Fetching CPU usage from kubelet", "node", nodeName, "source", "kubelet")
 	if r.RESTClient == nil {
 		return 0, fmt.Errorf("REST client not available")
 	}
@@ -447,7 +516,6 @@ func (r *NamespaceLifecyclePolicyReconciler) getNodeCPUUsage(
 		if len(responsePreview) > 500 {
 			responsePreview = responsePreview[:500] + "..."
 		}
-		log := logf.FromContext(ctx)
 		log.Info("⚠️ Failed to parse kubelet stats response", "node", nodeName, "responsePreview", responsePreview, "error", err)
 		return 0, fmt.Errorf("failed to parse kubelet stats: %w", err)
 	}
@@ -455,22 +523,85 @@ func (r *NamespaceLifecyclePolicyReconciler) getNodeCPUUsage(
 	// Convert nanocores to millicores
 	// 1 core = 1,000,000,000 nanocores = 1,000 millicores
 	usageMillicores := int64(stats.Node.CPU.UsageNanoCores / 1000000)
-	
+
 	// Debug: Log if usage is 0 (common in RKE2)
 	if usageMillicores == 0 {
-		log := logf.FromContext(ctx)
 		log.V(1).Info("CPU usage is 0 from kubelet stats", "node", nodeName, "usageNanoCores", stats.Node.CPU.UsageNanoCores)
 	}
 
 	return usageMillicores, nil
 }
 
+// getNodeCPUUsageFromURL fetches CPU usage percentage from a custom URL
+// Returns CPU usage as percentage (float64)
+// portAndPath should be in format ":9090/metrics" (port and path, no IP)
+func (r *NamespaceLifecyclePolicyReconciler) getNodeCPUUsageFromURL(
+	ctx context.Context,
+	node *corev1.Node,
+	portAndPath string,
+	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
+) (float64, error) {
+	if scrapeConfig == nil || scrapeConfig.CPU == "" {
+		return 0, fmt.Errorf("scrape.cpu path is required when using URL source")
+	}
+
+	// Get node IP
+	nodeIP, err := getNodeIP(node)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get IP for node %s: %w", node.Name, err)
+	}
+
+	// Construct full URL: http://{node-ip}{port+path}
+	fullURL := fmt.Sprintf("http://%s%s", nodeIP, portAndPath)
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Make HTTP GET request
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request to %s: %w", fullURL, err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch from %s: %w", fullURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, fullURL)
+	}
+
+	// Parse JSON response
+	var jsonData map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&jsonData); err != nil {
+		return 0, fmt.Errorf("failed to parse JSON response from %s: %w", fullURL, err)
+	}
+
+	// Extract CPU percentage using JSON path
+	cpuPercent, err := extractJSONPath(jsonData, scrapeConfig.CPU)
+	if err != nil {
+		return 0, fmt.Errorf("failed to extract CPU path '%s' from response: %w", scrapeConfig.CPU, err)
+	}
+
+	return cpuPercent, nil
+}
+
 // getNodeMemoryUsage queries kubelet stats API to get real-time memory usage
 // Returns memory usage in bytes
+// Note: URL sources are handled directly in checkNodeUsage
 func (r *NamespaceLifecyclePolicyReconciler) getNodeMemoryUsage(
 	ctx context.Context,
 	nodeName string,
+	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
 ) (int64, error) {
+	log := logf.FromContext(ctx)
+
+	// Use Kubernetes API server proxy to kubelet (default behavior)
+	log.V(1).Info("Fetching memory usage from kubelet", "node", nodeName, "source", "kubelet")
 	if r.RESTClient == nil {
 		return 0, fmt.Errorf("REST client not available")
 	}
@@ -493,20 +624,76 @@ func (r *NamespaceLifecyclePolicyReconciler) getNodeMemoryUsage(
 		if len(responsePreview) > 500 {
 			responsePreview = responsePreview[:500] + "..."
 		}
-		log := logf.FromContext(ctx)
 		log.Info("⚠️ Failed to parse kubelet stats response", "node", nodeName, "responsePreview", responsePreview, "error", err)
 		return 0, fmt.Errorf("failed to parse kubelet stats: %w", err)
 	}
 
 	memoryBytes := int64(stats.Node.Memory.UsageBytes)
-	
+
 	// Debug: Log if usage is 0 (common in RKE2)
 	if memoryBytes == 0 {
-		log := logf.FromContext(ctx)
 		log.V(1).Info("Memory usage is 0 from kubelet stats", "node", nodeName, "usageBytes", stats.Node.Memory.UsageBytes)
 	}
 
 	return memoryBytes, nil
+}
+
+// getNodeMemoryUsageFromURL fetches memory usage percentage from a custom URL
+// Returns memory usage as percentage (float64)
+// portAndPath should be in format ":9090/metrics" (port and path, no IP)
+func (r *NamespaceLifecyclePolicyReconciler) getNodeMemoryUsageFromURL(
+	ctx context.Context,
+	node *corev1.Node,
+	portAndPath string,
+	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
+) (float64, error) {
+	if scrapeConfig == nil || scrapeConfig.Mem == "" {
+		return 0, fmt.Errorf("scrape.mem path is required when using URL source")
+	}
+
+	// Get node IP
+	nodeIP, err := getNodeIP(node)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get IP for node %s: %w", node.Name, err)
+	}
+
+	// Construct full URL: http://{node-ip}{port+path}
+	fullURL := fmt.Sprintf("http://%s%s", nodeIP, portAndPath)
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Make HTTP GET request
+	req, err := http.NewRequestWithContext(ctx, "GET", fullURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request to %s: %w", fullURL, err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch from %s: %w", fullURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, fullURL)
+	}
+
+	// Parse JSON response
+	var jsonData map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&jsonData); err != nil {
+		return 0, fmt.Errorf("failed to parse JSON response from %s: %w", fullURL, err)
+	}
+
+	// Extract memory percentage using JSON path
+	memPercent, err := extractJSONPath(jsonData, scrapeConfig.Mem)
+	if err != nil {
+		return 0, fmt.Errorf("failed to extract memory path '%s' from response: %w", scrapeConfig.Mem, err)
+	}
+
+	return memPercent, nil
 }
 
 // hasSignal checks if a specific signal type exists in the signal list
@@ -517,4 +704,43 @@ func hasSignal(signals []appsv1alpha1.Signal, signalType appsv1alpha1.SignalType
 		}
 	}
 	return false
+}
+
+// extractJSONPath extracts a value from JSON using a dot-separated path (e.g., "a.b.c")
+// Returns the value as float64, or error if path not found
+func extractJSONPath(data map[string]interface{}, path string) (float64, error) {
+	keys := strings.Split(path, ".")
+	current := interface{}(data)
+
+	for i, key := range keys {
+		obj, ok := current.(map[string]interface{})
+		if !ok {
+			return 0, fmt.Errorf("path segment '%s' at position %d is not an object", key, i)
+		}
+
+		value, exists := obj[key]
+		if !exists {
+			return 0, fmt.Errorf("key '%s' not found at path segment %d", key, i)
+		}
+
+		// If this is the last key, return the value
+		if i == len(keys)-1 {
+			switch v := value.(type) {
+			case float64:
+				return v, nil
+			case int:
+				return float64(v), nil
+			case int32:
+				return float64(v), nil
+			case int64:
+				return float64(v), nil
+			default:
+				return 0, fmt.Errorf("value at path '%s' is not a number (got %T)", path, value)
+			}
+		}
+
+		current = value
+	}
+
+	return 0, fmt.Errorf("unexpected end of path '%s'", path)
 }

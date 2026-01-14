@@ -158,6 +158,13 @@ spec:
   #       cpuThresholdPercent: 80     # Trigger when any node reaches 80% CPU usage
   #       memoryThresholdPercent: 80  # Trigger when any node reaches 80% memory usage
   #       slowdownPercent: 60         # Reduce batch size to 60% when triggered
+  #       # Alternative metrics source for RKE2 or other environments where kubelet stats API doesn't work
+  #       # scrape:
+  #       #   source: ":9090/metrics"           # Port and path pattern (e.g., ":9090/metrics")
+  #       #                                     # Requests will be sent to http://{node-ip}:9090/metrics for each worker node
+  #       #   cpu: "cpu_usages.percentage"      # JSON path to extract CPU percentage
+  #       #   mem: "memory_usages.percentage"   # JSON path to extract memory percentage
+  #       # If source is "kubelet" or not specified, uses default kubelet stats API
   #
   #     # Signal 4: Pending Pods (🟠 Info - SLOW DOWN)
   #     # CLUSTER-WIDE: Counts resource-constrained pending pods across ALL namespaces

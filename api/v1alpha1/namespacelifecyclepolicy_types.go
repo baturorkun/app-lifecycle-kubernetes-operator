@@ -392,6 +392,35 @@ type NodeUsageCheckConfig struct {
 	// +kubebuilder:validation:Minimum=10
 	// +kubebuilder:validation:Maximum=100
 	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
+
+	// scrape defines alternative metrics source configuration
+	// If not specified or source is "kubelet", uses kubelet stats API
+	// If source is a URL, fetches JSON from that URL and extracts values using cpu/mem paths
+	// +optional
+	Scrape *MetricsScrapeConfig `json:"scrape,omitempty"`
+}
+
+// MetricsScrapeConfig defines configuration for alternative metrics source
+type MetricsScrapeConfig struct {
+	// source is either "kubelet" (default) or a port+path pattern (e.g., ":9090/metrics")
+	// When using port+path pattern, requests will be sent to each worker node's IP address
+	// Example: ":9090/metrics" will send requests to http://{node-ip}:9090/metrics for each node
+	// Default: "kubelet"
+	// +optional
+	// +kubebuilder:default="kubelet"
+	Source string `json:"source,omitempty"`
+
+	// cpu is the JSON path to extract CPU usage percentage from the response
+	// Example: "cpu_usages.percentage" or "metrics.cpu.usage"
+	// Only used when source is a URL
+	// +optional
+	CPU string `json:"cpu,omitempty"`
+
+	// mem is the JSON path to extract memory usage percentage from the response
+	// Example: "memory_usages.percentage" or "metrics.memory.usage"
+	// Only used when source is a URL
+	// +optional
+	Mem string `json:"mem,omitempty"`
 }
 
 // ContainerRestartsCheckConfig defines configuration for container restart monitoring

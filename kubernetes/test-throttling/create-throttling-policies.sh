@@ -112,11 +112,16 @@ spec:
 
       # Signal 3: Node Usage (Warning - PROACTIVE SLOW DOWN)
       # Monitors real-time CPU/memory usage from kubelet (~10s lag)
+      # Or from custom metrics server via scrape configuration
       checkNodeUsage:
         enabled: true
         cpuThresholdPercent: 40
         memoryThresholdPercent: 80
         slowdownPercent: 60
+        scrape:
+          source: ":9090/metrics"
+          cpu: "cpu_usages.percentage"
+          mem: "memory_usages.percentage"
 
       # Signal 4: Pending Pods (Info - SLOW DOWN)
       # CLUSTER-WIDE: Counts resource-constrained pending pods across ALL namespaces
