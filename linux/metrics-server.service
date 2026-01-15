@@ -1,0 +1,27 @@
+[Unit]
+Description=Metrics Server for Kubernetes Node Usage Monitoring
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+WorkingDirectory=/opt/metrics-server
+ExecStart=/usr/bin/python3 /opt/metrics-server/metrics.py 9090
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/metrics-server
+
+# Environment variables (optional - uncomment to customize)
+# Environment="METRICS_PORT=9090"
+
+[Install]
+WantedBy=multi-user.target
