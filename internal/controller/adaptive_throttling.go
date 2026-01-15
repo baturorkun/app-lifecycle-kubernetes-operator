@@ -203,11 +203,28 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 			// Add unique keyword for slowdown detection
 			if currentBatchSize < previousBatchSize {
-				log.Info("🐌 SLOWDOWN_DETECTED: Batch size reduced due to signals",
+				// Extract NodeUsage signal details (which nodes exceeded threshold)
+				highUsageNodes := []string{}
+				for _, sig := range signals {
+					if sig.Type == appsv1alpha1.SignalNodeUsage {
+						highUsageNodes = append(highUsageNodes, sig.Message)
+					}
+				}
+				
+				logFields := []interface{}{
 					"previous", previousBatchSize,
 					"new", currentBatchSize,
 					"initialTarget", actualInitial,
-					"signals", getSignalTypes(signals))
+					"signals", getSignalTypes(signals),
+					"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
+					"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
+				}
+				
+				if len(highUsageNodes) > 0 {
+					logFields = append(logFields, "highUsageNodes", highUsageNodes)
+				}
+				
+				log.Info("🐌 SLOWDOWN_DETECTED: Batch size reduced due to signals", logFields...)
 			} else {
 				log.Info("🐌 Throttling: Adjusted batch size",
 					"previous", previousBatchSize,

@@ -171,7 +171,7 @@ type NamespaceLifecyclePolicySpec struct {
 	// +optional
 	// +kubebuilder:default=100
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=1000
+	// +kubebuilder:validation:Maximum=99999
 	StartupResumePriority int32 `json:"startupResumePriority,omitempty"`
 
 	// adaptiveThrottling enables adaptive throttling during Resume operations

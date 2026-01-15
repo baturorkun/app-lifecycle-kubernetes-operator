@@ -37,7 +37,8 @@ echo "Namespaces:      ${NAMESPACES[*]}"
 echo "Count:           $NAMESPACE_COUNT"
 echo "Action:          Freeze"
 echo "StartupPolicy:   Resume"
-echo "Stagger:         20s between each"
+echo "Priority:        1, 2, 3, ... (sequential, max 1000)"
+echo "ResumeDelay:     ${DELAY}s (same for all policies)"
 echo "====================================="
 
 # === CREATE POLICIES ===
@@ -45,7 +46,9 @@ echo "====================================="
 echo ""
 echo "Creating policies..."
 
+# Fixed delay for all policies (in seconds) - same for all policies
 DELAY=0
+PRIORITY=1
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 for NS in "${NAMESPACES[@]}"; do
@@ -53,9 +56,10 @@ for NS in "${NAMESPACES[@]}"; do
     OPERATION_ID="freeze-${TIMESTAMP}-${NS}"
 
     echo ""
-    echo "[$((DELAY/10 + 1))/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
+    echo "[$PRIORITY/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
     echo "  Target NS:     $NS"
     echo "  OperationID:   $OPERATION_ID"
+    echo "  Priority:      $PRIORITY"
     echo "  ResumeDelay:   ${DELAY}s"
 
     cat <<EOF | kubectl apply -f -
@@ -76,6 +80,10 @@ spec:
 
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
+
+  # Startup resume priority (lower number = higher priority)
+  # Sequential priorities: 1000, 2000, 3000, ...
+  startupResumePriority: $PRIORITY
 
   # Startup resume delay for staggering (prevents simultaneous resume burst)
   startupResumeDelay: ${DELAY}s
@@ -150,8 +158,8 @@ spec:
       app: test-throttle
 EOF
 
-    # Increment delay by 20 seconds for next namespace
-    DELAY=$((DELAY + 10))
+    # Increment priority by 1 for next namespace (delay stays the same for all)
+    PRIORITY=$((PRIORITY + 1))
 done
 
 # === SUMMARY ===

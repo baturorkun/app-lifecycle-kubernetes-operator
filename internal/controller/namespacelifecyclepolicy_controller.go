@@ -543,6 +543,18 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		// Startup policy is independent of manual operations (spec.action/operationId)
 		log.Info("⏸️ Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
+		// Very prominent log when startup resume begins
+		priority := policy.Spec.StartupResumePriority
+		if priority == 0 {
+			priority = 100
+		}
+		log.Info("🚀🚀🚀 ========== STARTUP RESUME OPERATION STARTING ========== 🚀🚀🚀",
+			"policy", policy.Name,
+			"targetNamespace", policy.Spec.TargetNamespace,
+			"startupResumePriority", priority,
+			"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
+			"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
+
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
 			log.Info("🚀 Startup policy: using adaptive throttling for resume",
@@ -788,6 +800,18 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				log.Error(err, "Failed to list statefulsets for startup resume")
 				return ctrl.Result{}, err
 			}
+
+			// Very prominent log when delayed startup resume begins
+			priority := policy.Spec.StartupResumePriority
+			if priority == 0 {
+				priority = 100
+			}
+			log.Info("🚀🚀🚀 ========== STARTUP RESUME OPERATION STARTING (AFTER DELAY) ========== 🚀🚀🚀",
+				"policy", policy.Name,
+				"targetNamespace", policy.Spec.TargetNamespace,
+				"startupResumePriority", priority,
+				"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
+				"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
 
 			// Check if adaptive throttling is enabled
 			if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {

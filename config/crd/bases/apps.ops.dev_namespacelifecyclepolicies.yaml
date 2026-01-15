@@ -429,10 +429,10 @@ spec:
                   Only applies when startupPolicy is Resume.
                   If not specified, default priority is 100 (processed after all specified priorities).
                   Policies with the same priority are processed in creation order (older first).
-                  When combined with resumeDelay, policies are processed in priority order,
+                  When combined with startupResumeDelay, policies are processed in priority order,
                   and each policy waits for its delay and resume completion before the next priority starts.
                 format: int32
-                maximum: 1000
+                maximum: 99999
                 minimum: 1
                 type: integer
               targetNamespace:
