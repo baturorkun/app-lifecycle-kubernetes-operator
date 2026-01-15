@@ -444,11 +444,11 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	// Better to always apply startup policy - the freeze/resume functions are idempotent anyway
 	// They will skip if workloads are already in the desired state
 
-	// Apply resumeDelay if this is a Resume startup action
+	// Apply startupResumeDelay if this is a Resume startup action
 	// Set status fields instead of annotations - cleaner and follows Kubernetes best practices
-	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.ResumeDelay.Duration > 0 {
-		log.Info("⏱️ Resume delay configured for startup policy - setting status for Reconcile loop",
-			"delay", policy.Spec.ResumeDelay.Duration,
+	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.StartupResumeDelay.Duration > 0 {
+		log.Info("⏱️ Startup resume delay configured for startup policy - setting status for Reconcile loop",
+			"delay", policy.Spec.StartupResumeDelay.Duration,
 			"targetNamespace", policy.Spec.TargetNamespace)
 
 		// Update status with retry to handle concurrent updates
@@ -466,7 +466,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			latestPolicy.Status.PendingStartupResume = true
 			latestPolicy.Status.StartupResumeDelayStartedAt = &now
 			latestPolicy.Status.Phase = appsv1alpha1.PhaseIdle
-			latestPolicy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.ResumeDelay.Duration)
+			latestPolicy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Resume", policy.Spec.StartupResumeDelay.Duration)
 			latestPolicy.Status.LastStartupAt = &now
 			latestPolicy.Status.LastStartupAction = "RESUME_DELAYED"
 
@@ -577,9 +577,13 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			}
 		}
 		policy.Status.Phase = appsv1alpha1.PhaseResumed
-		// Set final message - will be updated by adaptive throttling if enabled, otherwise use this
-		if policy.Status.Message == "" {
-			policy.Status.Message = fmt.Sprintf("Startup resume completed successfully (%d deployments, %d statefulsets)",
+		// Always update message to indicate startup resume was applied
+		if policy.Status.AdaptiveProgress != nil && policy.Status.AdaptiveProgress.Message != "" {
+			// Use adaptive throttling message with startup resume prefix
+			policy.Status.Message = fmt.Sprintf("Startup resume applied: %s", policy.Status.AdaptiveProgress.Message)
+		} else {
+			// Standard startup resume message
+			policy.Status.Message = fmt.Sprintf("Startup resume applied: completed successfully (%d deployments, %d statefulsets)",
 				len(deployments.Items), len(statefulSets.Items))
 		}
 		policy.Status.LastResumeAt = &now
@@ -749,13 +753,13 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			}
 
 			elapsed := time.Since(policy.Status.StartupResumeDelayStartedAt.Time)
-			if elapsed < policy.Spec.ResumeDelay.Duration {
+			if elapsed < policy.Spec.StartupResumeDelay.Duration {
 				// Delay not yet complete
-				remaining := policy.Spec.ResumeDelay.Duration - elapsed
+				remaining := policy.Spec.StartupResumeDelay.Duration - elapsed
 				// Log at first check (when elapsed is very small) to show timer started
 				if elapsed < 2*time.Second {
 					log.Info("⏳ Startup resume delay timer started",
-						"totalDelay", policy.Spec.ResumeDelay.Duration,
+						"totalDelay", policy.Spec.StartupResumeDelay.Duration,
 						"policy", policy.Name,
 						"targetNamespace", policy.Spec.TargetNamespace)
 				}
@@ -768,7 +772,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 			// Delay complete! Perform the startup resume now
 			log.Info("🚀 Startup resume delay completed - executing resume",
-				"delay", policy.Spec.ResumeDelay.Duration,
+				"delay", policy.Spec.StartupResumeDelay.Duration,
 				"policy", policy.Name,
 				"targetNamespace", policy.Spec.TargetNamespace)
 
@@ -822,9 +826,13 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			// Update status with retry on conflict
 			now := metav1.Now()
 			policy.Status.Phase = appsv1alpha1.PhaseResumed
-			// Set final message - will be updated by adaptive throttling if enabled, otherwise use this
-			if policy.Status.Message == "" {
-				policy.Status.Message = fmt.Sprintf("Startup resume completed after delay (%d deployments, %d statefulsets)",
+			// Always update message to indicate startup resume was applied
+			if policy.Status.AdaptiveProgress != nil && policy.Status.AdaptiveProgress.Message != "" {
+				// Use adaptive throttling message with startup resume prefix
+				policy.Status.Message = fmt.Sprintf("Startup resume applied: %s", policy.Status.AdaptiveProgress.Message)
+			} else {
+				// Standard startup resume message
+				policy.Status.Message = fmt.Sprintf("Startup resume applied: completed after delay (%d deployments, %d statefulsets)",
 					len(deployments.Items), len(statefulSets.Items))
 			}
 			policy.Status.LastResumeAt = &now

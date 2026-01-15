@@ -21,6 +21,9 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"sort"
+	"sync"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -31,6 +34,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"github.com/go-logr/logr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -57,6 +61,77 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// processPolicyWithDelayAndResume processes a single policy: applies startup policy, waits for delay, and polls for resume completion
+func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, reconciler *controller.NamespaceLifecyclePolicyReconciler, k8sClient client.Client, policy *appsv1alpha1.NamespaceLifecyclePolicy, priority int32) {
+	logger.Info("Processing policy", "policy", policy.Name, "priority", priority)
+
+	if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
+		logger.Error(err, "Failed to apply startup policy", "policy", policy.Name)
+		return
+	}
+
+	// Re-fetch the policy to get updated status
+	latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+		logger.Error(err, "Failed to re-fetch policy after ApplyStartupPolicy", "policy", policy.Name)
+		return
+	}
+
+	// Wait for this policy to complete (delay + resume) - only if startupPolicy is Resume
+	if latestPolicy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyResume {
+		logger.Info("⏳ Waiting for policy to complete", "policy", latestPolicy.Name, "priority", priority, "delay", latestPolicy.Spec.StartupResumeDelay.Duration)
+
+		// Wait for delay to complete (if any) - use time.Sleep instead of polling
+		if latestPolicy.Spec.StartupResumeDelay.Duration > 0 {
+			delayDuration := latestPolicy.Spec.StartupResumeDelay.Duration
+			logger.Info("⏱️ Waiting for startup resume delay", "policy", latestPolicy.Name, "delay", delayDuration)
+			time.Sleep(delayDuration)
+			logger.Info("✅ Resume delay completed", "policy", latestPolicy.Name)
+
+			// Re-fetch after delay to check if resume has started
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				logger.Error(err, "Failed to re-fetch policy after delay", "policy", policy.Name)
+				return
+			}
+		}
+
+		// Wait for resume to complete (Phase = Resumed) - use polling
+		logger.Info("⏳ Waiting for resume to complete", "policy", latestPolicy.Name)
+		maxWaitTime := 30 * time.Minute // Maximum wait time
+		startTime := time.Now()
+		pollInterval := 2 * time.Second
+
+		for {
+			// Check timeout
+			if time.Since(startTime) >= maxWaitTime {
+				logger.Info("⚠️ Timeout waiting for resume to complete", "policy", latestPolicy.Name, "maxWaitTime", maxWaitTime)
+				break
+			}
+
+			// Re-fetch to check status
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				logger.Error(err, "Failed to re-fetch policy during resume wait", "policy", policy.Name)
+				break
+			}
+
+			// Check if resume is complete
+			if latestPolicy.Status.Phase == appsv1alpha1.PhaseResumed {
+				logger.Info("✅ Resume completed", "policy", latestPolicy.Name, "waited", time.Since(startTime))
+				break
+			}
+
+			// Check if failed
+			if latestPolicy.Status.Phase == appsv1alpha1.PhaseFailed {
+				logger.Info("⚠️ Resume failed", "policy", latestPolicy.Name)
+				break
+			}
+
+			// Sleep before checking again
+			time.Sleep(pollInterval)
+		}
+	}
+}
+
 // applyStartupPolicies applies startup policies for all existing NamespaceLifecyclePolicy resources
 // This runs once when the operator starts, before the controller starts processing events
 func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
@@ -81,41 +156,76 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		Scheme: mgr.GetScheme(),
 	}
 
-	// Apply startup policy for each resource
-	for i := range policyList.Items {
-		policy := &policyList.Items[i]
-		if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
-			setupLog.Error(err, "Failed to apply startup policy", "policy", policy.Name)
-			// Continue with other policies even if one fails
-			continue
+	// Sort by priority (lower number = higher priority)
+	// For same priority, sort by creation timestamp (older first)
+	policies := policyList.Items
+	sort.Slice(policies, func(i, j int) bool {
+		// Get priority (default 100 if not specified)
+		priorityI := policies[i].Spec.StartupResumePriority
+		if priorityI == 0 {
+			priorityI = 100
+		}
+		priorityJ := policies[j].Spec.StartupResumePriority
+		if priorityJ == 0 {
+			priorityJ = 100
 		}
 
-		// Re-fetch the policy to get updated status (ApplyStartupPolicy updates status but not our local copy)
-		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-		if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
-			setupLog.Error(err, "Failed to re-fetch policy after ApplyStartupPolicy", "policy", policy.Name)
-			continue
+		// Sort by priority first
+		if priorityI != priorityJ {
+			return priorityI < priorityJ
 		}
 
-		// Debug: Log the re-fetched status
-		setupLog.Info("🔍 Re-fetched policy after ApplyStartupPolicy",
-			"policy", latestPolicy.Name,
-			"pendingStartupResume", latestPolicy.Status.PendingStartupResume,
-			"phase", latestPolicy.Status.Phase,
-			"resumeDelay", latestPolicy.Spec.ResumeDelay.Duration)
+		// Same priority: sort by creation timestamp (older first)
+		return policies[i].CreationTimestamp.Before(&policies[j].CreationTimestamp)
+	})
 
-		// If policy has pending startup resume, manually trigger reconcile
-		// This is necessary because status updates don't trigger reconcile (by design)
-		// We need to manually start the delay timer via reconcile
-		// PendingStartupResume status has been set
-		// The Reconcile loop will automatically be triggered when status.PendingStartupResume becomes true
-		// (via the UpdateFunc predicate in SetupWithManager)
-		// The Reconcile loop will handle the delay and execute the resume after ResumeDelay expires
-		if latestPolicy.Status.PendingStartupResume {
-			setupLog.Info("✅ Pending startup resume scheduled - Reconcile loop will handle delay",
-				"policy", latestPolicy.Name,
-				"delay", latestPolicy.Spec.ResumeDelay.Duration)
+	setupLog.Info("Policies sorted by priority", "count", len(policies))
+
+	// Group policies by priority
+	priorityGroups := make(map[int32][]*appsv1alpha1.NamespaceLifecyclePolicy)
+	priorityOrder := []int32{} // To maintain order
+
+	for i := range policies {
+		policy := &policies[i]
+		priority := policy.Spec.StartupResumePriority
+		if priority == 0 {
+			priority = 100
 		}
+
+		if _, exists := priorityGroups[priority]; !exists {
+			priorityGroups[priority] = []*appsv1alpha1.NamespaceLifecyclePolicy{}
+			priorityOrder = append(priorityOrder, priority)
+		}
+		priorityGroups[priority] = append(priorityGroups[priority], policy)
+	}
+
+	// Sort priority order (lowest number first = highest priority)
+	sort.Slice(priorityOrder, func(i, j int) bool {
+		return priorityOrder[i] < priorityOrder[j]
+	})
+
+	setupLog.Info("Policies grouped by priority", "priorityGroups", len(priorityOrder))
+
+	// Process each priority group sequentially
+	for _, priority := range priorityOrder {
+		group := priorityGroups[priority]
+		setupLog.Info("🚀 Processing priority group", "priority", priority, "policies", len(group))
+
+		// Process all policies in this priority group in parallel
+		var wg sync.WaitGroup
+		for _, policy := range group {
+			wg.Add(1)
+			go func(p *appsv1alpha1.NamespaceLifecyclePolicy) {
+				defer wg.Done()
+				// Create a logger with policy name for better traceability
+				policyLogger := setupLog.WithValues("policy", p.Name, "priority", priority)
+				processPolicyWithDelayAndResume(ctx, policyLogger, reconciler, k8sClient, p, priority)
+			}(policy)
+		}
+
+		// Wait for all policies in this priority group to complete
+		wg.Wait()
+		setupLog.Info("✅ Priority group completed", "priority", priority, "policies", len(group))
 	}
 
 	setupLog.Info("Startup policy check completed")

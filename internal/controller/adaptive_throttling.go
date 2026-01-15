@@ -170,8 +170,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		// 2. Check for critical signals (Node NotReady)
 		if hasSignal(signals, appsv1alpha1.SignalNodeNotReady) {
 			log.Info("🔴 Node(s) NotReady detected, pausing resume",
-				"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
-				"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+				"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
+				"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
 				"pending", metrics.PendingPods,
 				"crash", metrics.UnhealthyPods,
 				"signals", getSignalTypes(signals))
@@ -227,8 +227,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		log.Info("⚙️ Processing batch",
 			"batchSize", len(batch),
 			"progress", fmt.Sprintf("%d/%d", resumedCount, totalWorkloads),
-			"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
-			"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+			"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
+			"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
 			"pending", metrics.PendingPods,
 			"crash", metrics.UnhealthyPods,
 			"signals", getSignalTypes(signals))
@@ -268,8 +268,8 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 			waitDuration := r.calculateWaitDuration(signals, batchInterval)
 			log.Info("💤 Waiting between batches",
 				"duration", waitDuration,
-				"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
-				"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+				"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
+				"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
 				"pending", metrics.PendingPods,
 				"crash", metrics.UnhealthyPods,
 				"signals", getSignalTypes(signals))
@@ -478,8 +478,8 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForSignalClear(
 			if !hasSignal(signals, signalType) {
 				log.Info("Signal cleared",
 					"signal", signalType,
-					"cpu", fmt.Sprintf("%d%%", metrics.MaxCPUPercent),
-					"mem", fmt.Sprintf("%d%%", metrics.MaxMemPercent),
+					"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
+					"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
 					"pending", metrics.PendingPods,
 					"crash", metrics.UnhealthyPods,
 					"waitedSeconds", int(elapsed.Seconds()))

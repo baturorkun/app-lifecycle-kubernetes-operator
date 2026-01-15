@@ -63,8 +63,8 @@ func getNodeIP(node *corev1.Node) (string, error) {
 type ThrottlingMetrics struct {
 	NotReadyNodes  int32
 	PendingPods    int32
-	MaxCPUPercent  int32
-	MaxMemPercent  int32
+	AvgCPUPercent  int32 // Average CPU usage across all nodes
+	AvgMemPercent  int32 // Average memory usage across all nodes
 	UnhealthyPods  int32
 	RestartLatency int32 // Not used yet but good for future
 }
@@ -120,7 +120,7 @@ func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 		if config.SignalChecks.CheckNodeUsage.Scrape != nil {
 			scrapeConfig = config.SignalChecks.CheckNodeUsage.Scrape
 		}
-		usageSignals, maxCPU, maxMem, err := r.checkNodeUsage(
+		usageSignals, avgCPU, avgMem, err := r.checkNodeUsage(
 			ctx,
 			config.NodeSelector,
 			config.SignalChecks.CheckNodeUsage.CPUThresholdPercent,
@@ -131,8 +131,8 @@ func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 			return signals, metrics, fmt.Errorf("failed to check node usage: %w", err)
 		}
 		signals = append(signals, usageSignals...)
-		metrics.MaxCPUPercent = maxCPU
-		metrics.MaxMemPercent = maxMem
+		metrics.AvgCPUPercent = avgCPU
+		metrics.AvgMemPercent = avgMem
 	}
 
 	// Sinyal 5: Container Restarts kontrolü (only in targetNamespace)
@@ -351,8 +351,9 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 	scrapeConfig *appsv1alpha1.MetricsScrapeConfig,
 ) ([]appsv1alpha1.Signal, int32, int32, error) {
 	signals := []appsv1alpha1.Signal{}
-	maxCPU := int32(0)
-	maxMem := int32(0)
+	totalCPU := int32(0)
+	totalMem := int32(0)
+	nodeCount := int32(0)
 
 	// Default thresholds if not specified
 	if cpuThreshold == 0 {
@@ -370,7 +371,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 	// List nodes matching selector
 	nodeList := &corev1.NodeList{}
 	if err := r.List(ctx, nodeList, client.MatchingLabels(nodeSelector)); err != nil {
-		return signals, maxCPU, maxMem, err
+		return signals, 0, 0, err
 	}
 
 	// Fallsback: If no worker nodes found (common in local single-node clusters), list ALL nodes
@@ -378,7 +379,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 		log := logf.FromContext(ctx)
 		log.V(1).Info("No nodes found with worker label, falling back to all nodes")
 		if err := r.List(ctx, nodeList); err != nil {
-			return signals, maxCPU, maxMem, err
+			return signals, 0, 0, err
 		}
 	}
 
@@ -457,13 +458,10 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 			memoryPercent = int32((usedMemory * 100) / allocatableMemory.Value())
 		}
 
-		// Track max values
-		if cpuPercent > maxCPU {
-			maxCPU = cpuPercent
-		}
-		if memoryPercent > maxMem {
-			maxMem = memoryPercent
-		}
+		// Accumulate values for average calculation
+		totalCPU += cpuPercent
+		totalMem += memoryPercent
+		nodeCount++
 
 		// Check if THIS NODE exceeds threshold
 		if cpuPercent >= cpuThreshold || memoryPercent >= memoryThreshold {
@@ -476,7 +474,14 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 		}
 	}
 
-	return signals, maxCPU, maxMem, nil
+	// Calculate average values
+	var avgCPU, avgMem int32
+	if nodeCount > 0 {
+		avgCPU = totalCPU / nodeCount
+		avgMem = totalMem / nodeCount
+	}
+
+	return signals, avgCPU, avgMem, nil
 }
 
 // getNodeCPUUsage queries kubelet stats API to get real-time CPU usage

@@ -151,15 +151,28 @@ type NamespaceLifecyclePolicySpec struct {
 	// +optional
 	StartupNodeReadinessPolicy *StartupNodeReadinessPolicy `json:"startupNodeReadinessPolicy,omitempty"`
 
-	// resumeDelay specifies how long to wait before starting a Resume operation.
-	// ONLY applies to Resume operations (action: Resume OR startupPolicy: Resume).
-	// Does NOT apply to Freeze operations.
-	// Useful for staggering multiple namespace resume operations to prevent
-	// simultaneous resume bursts that could overload nodes.
+	// startupResumeDelay specifies how long to wait before starting a startup Resume operation.
+	// ONLY applies to startup resume operations (startupPolicy: Resume).
+	// Does NOT apply to manual Resume operations (action: Resume) or Freeze operations.
+	// Useful for staggering multiple namespace resume operations during cluster startup
+	// to prevent simultaneous resume bursts that could overload nodes.
 	// Default: 0s (no delay)
 	// +optional
 	// +kubebuilder:default="0s"
-	ResumeDelay metav1.Duration `json:"resumeDelay,omitempty"`
+	StartupResumeDelay metav1.Duration `json:"startupResumeDelay,omitempty"`
+
+	// startupResumePriority defines the priority order for startup resume operations.
+	// Lower numbers have higher priority (e.g., 1 is processed before 2).
+	// Only applies when startupPolicy is Resume.
+	// If not specified, default priority is 100 (processed after all specified priorities).
+	// Policies with the same priority are processed in creation order (older first).
+	// When combined with startupResumeDelay, policies are processed in priority order,
+	// and each policy waits for its delay and resume completion before the next priority starts.
+	// +optional
+	// +kubebuilder:default=100
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1000
+	StartupResumePriority int32 `json:"startupResumePriority,omitempty"`
 
 	// adaptiveThrottling enables adaptive throttling during Resume operations
 	// to prevent node overload by monitoring node conditions and pending pods.

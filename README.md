@@ -14,6 +14,9 @@ When the operator starts (restart, node reboot, upgrade):
 - **Smart Reconciliation**: Only applies action if current state differs from desired state
 - **Idempotent**: Safe to run multiple times, won't duplicate operations
 - **Status Tracking**: Records timestamp and action in resource status
+- **Priority-Based Processing**: Control the order of startup resume operations using `startupResumePriority`
+- **Delayed Startup Resume**: Stagger multiple namespace resume operations using `startupResumeDelay` to prevent cluster overload
+- **Parallel Processing**: Policies with the same priority are processed in parallel for faster startup
 
 ### 🎫 Operation Idempotency
 - Prevents duplicate operations using `operationId`
@@ -47,6 +50,35 @@ spec:
     deployment: 15   # Fast shutdown for stateless apps
     statefulSet: 60  # Longer for stateful apps
 ```
+
+### ⏱️ Startup Resume Priority & Delay
+Control the order and timing of startup resume operations:
+- **Priority-Based Ordering**: Lower numbers = higher priority (e.g., priority 1 processes before priority 2)
+- **Parallel Processing**: Policies with the same priority start simultaneously
+- **Sequential Between Priorities**: All policies in a priority group must complete before the next priority starts
+- **Delayed Resume**: Stagger resume operations to prevent simultaneous bursts that could overload nodes
+- **Creation Order Tiebreaker**: Policies with the same priority are processed by creation timestamp (older first)
+
+Example:
+```yaml
+spec:
+  startupPolicy: Resume
+  startupResumePriority: 1      # Higher priority (processed first)
+  startupResumeDelay: 30s       # Wait 30 seconds before starting resume
+```
+
+**Processing Flow:**
+1. Policies are sorted by priority (lower = higher priority)
+2. All policies with the same priority start in parallel
+3. Each policy waits for its delay (if configured)
+4. Each policy waits for its resume to complete
+5. System waits for ALL policies in the priority group to complete
+6. Then moves to the next priority group
+
+**Use Cases:**
+- **Critical namespaces first**: Set priority 1 for production, priority 2 for staging
+- **Staggered resume**: Use delays to prevent all namespaces resuming at once
+- **Parallel processing**: Same priority policies resume simultaneously for faster startup
 
 ### 🚀 Startup Node Readiness Policy
 Wait for worker nodes to be ready before applying startup policy:
@@ -176,7 +208,7 @@ This will:
 - Store original replica counts in annotations
 - Set `startupPolicy: Ignore` means no action on operator restart
 
-### Example 2: Resume with Startup Policy
+### Example 2: Resume with Startup Policy and Priority
 
 ```yaml
 apiVersion: apps.ops.dev/v1alpha1
@@ -189,12 +221,61 @@ spec:
   action: Resume
   operationId: "op-20231215-002"
   startupPolicy: Resume
+  startupResumePriority: 1      # High priority (processed first)
+  startupResumeDelay: 0s        # Start immediately
 ```
 
 This will:
 - Resume all frozen Deployments/StatefulSets in `dev` namespace
 - On operator restart, automatically resume if namespace is frozen
+- Processed with priority 1 (before lower priority policies)
+- Starts immediately (no delay)
 - Smart: Only resumes if current state differs from desired state
+
+### Example 2b: Staggered Resume with Priority
+
+```yaml
+# Production namespace - highest priority, immediate start
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: resume-prod
+spec:
+  targetNamespace: production
+  startupPolicy: Resume
+  startupResumePriority: 1
+  startupResumeDelay: 0s
+
+---
+# Staging namespace - lower priority, 30s delay
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: resume-staging
+spec:
+  targetNamespace: staging
+  startupPolicy: Resume
+  startupResumePriority: 2
+  startupResumeDelay: 30s
+
+---
+# Development namespace - lowest priority, 60s delay
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: resume-dev
+spec:
+  targetNamespace: dev
+  startupPolicy: Resume
+  startupResumePriority: 3
+  startupResumeDelay: 60s
+```
+
+This will:
+- Production resumes first (priority 1, no delay)
+- After production completes, staging starts (priority 2, waits 30s after production completes)
+- After staging completes, dev starts (priority 3, waits 60s after staging completes)
+- Multiple policies with the same priority would start in parallel
 
 ### Example 3: Freeze Specific Apps Using Selector
 
@@ -366,6 +447,8 @@ This will:
 | `action` | enum | Yes | `Freeze` or `Resume` |
 | `operationId` | string | No | Unique ID for operation idempotency |
 | `startupPolicy` | enum | Yes | `Ignore`, `Freeze`, or `Resume` - action on operator startup |
+| `startupResumePriority` | int32 | No | Priority order for startup resume operations (lower = higher priority, default: 100, min: 1, max: 1000) |
+| `startupResumeDelay` | Duration | No | Delay before starting startup resume operation (default: 0s, only applies to startupPolicy: Resume) |
 | `selector` | LabelSelector | No | Filter resources by labels (all if omitted) |
 | `balancePods` | boolean | No | Enable automatic pod redistribution when nodes become Ready (default: false) |
 | `balanceWindowSeconds` | int32 | No | Time window in seconds for pod balancing after resume (default: 600, max: 3600) |
@@ -416,9 +499,18 @@ When the operator starts, it checks each policy's `startupPolicy`:
 | `Resume` | `Resumed` | No action (already resumed) ✅ |
 | `Resume` | `Frozen` | Resume namespace ▶️ |
 
+**Processing Order:**
+1. Policies are sorted by `startupResumePriority` (lower number = higher priority)
+2. Policies with the same priority are sorted by creation timestamp (older first)
+3. Policies with the same priority are processed in parallel
+4. Each policy waits for its `startupResumeDelay` (if configured)
+5. Each policy waits for its resume operation to complete
+6. All policies in a priority group must complete before the next priority group starts
+
 Status records the result in `lastStartupAction`:
 - `FREEZE_APPLIED` - Froze the namespace
 - `RESUME_APPLIED` - Resumed the namespace
+- `RESUME_DELAYED` - Resume scheduled with delay
 - `NO_ACTION_ALREADY_FROZEN` - Already in frozen state
 - `NO_ACTION_ALREADY_RESUMED` - Already in resumed state
 - `SKIPPED_IGNORE` - StartupPolicy set to Ignore

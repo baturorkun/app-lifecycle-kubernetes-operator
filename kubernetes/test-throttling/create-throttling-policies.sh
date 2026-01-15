@@ -77,8 +77,8 @@ spec:
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
 
-  # Resume delay for staggering (prevents simultaneous resume burst)
-  resumeDelay: ${DELAY}s
+  # Startup resume delay for staggering (prevents simultaneous resume burst)
+  startupResumeDelay: ${DELAY}s
 
   # Adaptive throttling configuration for Resume operations
   adaptiveThrottling:

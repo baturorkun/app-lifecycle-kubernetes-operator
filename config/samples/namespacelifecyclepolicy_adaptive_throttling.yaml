@@ -18,7 +18,11 @@ spec:
 
   # NEW: Startup delay for staggering multiple namespace resume operations
   # This namespace starts immediately (0s = default)
-  resumeDelay: 0s
+  startupResumeDelay: 0s
+
+  # NEW: Startup resume priority (lower number = higher priority)
+  # This policy will be processed before policies with higher priority numbers
+  startupResumePriority: 1
 
   # ADAPTIVE THROTTLING CONFIGURATION
   # This enables CPU-aware, adaptive batched resume to prevent node overload
@@ -94,6 +98,7 @@ spec:
   targetNamespace: staging
   action: Resume
   startupPolicy: Resume
+  startupResumePriority: 100  # Default priority (processed after all specified priorities)
 
   adaptiveThrottling:
     enabled: true
@@ -109,6 +114,7 @@ spec:
   targetNamespace: dev
   action: Resume
   startupPolicy: Resume
+  startupResumePriority: 2  # Processed after priority 1, before priority 100
 
   adaptiveThrottling:
     enabled: true
@@ -152,6 +158,7 @@ spec:
   targetNamespace: test
   action: Resume
   startupPolicy: Resume
+  startupResumePriority: 3  # Processed after priority 2
 
   adaptiveThrottling:
     enabled: true

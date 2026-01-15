@@ -10,6 +10,8 @@ spec:
     matchLabels:
       app: test
   startupPolicy: Resume
+  startupResumePriority: 1  # Higher priority (processed first)
+  startupResumeDelay: 0s
   balancePods: true
   balanceWindowSeconds: 300
   terminationGracePeriodSeconds:

@@ -30,17 +30,31 @@ spec:
   # Can be used for tracking and correlation purposes.
   # operationId: "op-123456789-2"
 
-  # resumeDelay specifies how long to wait before starting the Resume operation.
+  # startupResumeDelay specifies how long to wait before starting the startup Resume operation.
   # ONLY applies to startup (when startupPolicy: Resume triggers).
   # Does NOT apply to manual Resume operations (changing spec.action).
   # Useful for staggering multiple namespace resume operations during cluster startup
   # to prevent simultaneous resume bursts that could overload nodes.
   # Default: 0s (no delay)
   # Example: Use different delays for different namespaces:
-  #   namespace-1: resumeDelay: 0s    (starts immediately at startup)
-  #   namespace-2: resumeDelay: 30s   (waits 30 seconds at startup)
-  #   namespace-3: resumeDelay: 60s   (waits 60 seconds at startup)
-  # resumeDelay: 0s
+  #   namespace-1: startupResumeDelay: 0s    (starts immediately at startup)
+  #   namespace-2: startupResumeDelay: 30s   (waits 30 seconds at startup)
+  #   namespace-3: startupResumeDelay: 60s   (waits 60 seconds at startup)
+  # startupResumeDelay: 0s
+
+  # startupResumePriority defines the priority order for startup resume operations.
+  # Lower numbers have higher priority (e.g., 1 is processed before 2).
+  # Only applies when startupPolicy is Resume.
+  # If not specified, default priority is 100 (processed after all specified priorities).
+  # Policies with the same priority are processed in creation order (older first).
+  # When combined with startupResumeDelay, policies are processed in priority order,
+  # and each policy waits for its delay and resume completion before the next priority starts.
+  # Example: Use priority to control processing order:
+  #   namespace-1: startupResumePriority: 1, startupResumeDelay: 0s    (processed first, starts immediately)
+  #   namespace-2: startupResumePriority: 2, startupResumeDelay: 30s   (processed second, waits 30s after NS-1 completes)
+  #   namespace-3: startupResumePriority: 3, startupResumeDelay: 60s   (processed third, waits 60s after NS-2 completes)
+  # +optional
+  # startupResumePriority: 100  # Default priority (processed after all specified priorities)
 
   # ============================================================================
   # WORKLOAD SELECTION
