@@ -204,3 +204,38 @@ spec:
   #
   #   # Fallback behavior if signals cannot be collected
   #   fallbackOnMetricsUnavailable: true
+
+  # ============================================================================
+  # PRE-CONDITIONS (Resume only)
+  # ============================================================================
+
+  # preConditions defines requirements that must be met before Resume operations can proceed.
+  # Only applies when action is Resume.
+  # Checks app readiness and health endpoints before resuming the namespace.
+  # preConditions:
+  #   enabled: true
+  #
+  #   # appReadinessChecks lists apps that must be ready before resuming
+  #   # Format: "namespace.name" (e.g., "production.database")
+  #   # Checks Deployment or StatefulSet readiness (all replicas ready, conditions met)
+  #   # The operator will check for Deployment first, then StatefulSet if not found.
+  #   appReadinessChecks:
+  #     - "infrastructure.database"      # Wait for database in infrastructure namespace
+  #     - "infrastructure.redis"           # Wait for redis in infrastructure namespace
+  #
+  #   # healthEndpointChecks lists HTTP endpoints that must return healthy status
+  #   # Format: "http://service-name.namespace.svc.cluster.local:port/path" or "https://..."
+  #   # Default: expects 200-299 status codes
+  #   healthEndpointChecks:
+  #     - url: "http://api.gateway.svc.cluster.local:8080/health"
+  #       expectedStatusCodes: [200]
+  #       timeoutSeconds: 5
+  #
+  #   # checkInterval defines how often to check pre-conditions (in seconds)
+  #   # Default: 5
+  #   checkInterval: 5
+  #
+  #   # timeoutSeconds is the maximum time to wait for pre-conditions (in seconds)
+  #   # If 0 or not set, waits indefinitely
+  #   # Default: 0 (wait indefinitely)
+  #   timeoutSeconds: 0

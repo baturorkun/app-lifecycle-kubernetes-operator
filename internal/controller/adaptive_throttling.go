@@ -210,7 +210,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 						highUsageNodes = append(highUsageNodes, sig.Message)
 					}
 				}
-				
+
 				logFields := []interface{}{
 					"previous", previousBatchSize,
 					"new", currentBatchSize,
@@ -219,11 +219,11 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 					"nodesAvgCpu", fmt.Sprintf("%d%%", metrics.AvgCPUPercent),
 					"nodesAvgMem", fmt.Sprintf("%d%%", metrics.AvgMemPercent),
 				}
-				
+
 				if len(highUsageNodes) > 0 {
 					logFields = append(logFields, "highUsageNodes", highUsageNodes)
 				}
-				
+
 				log.Info("🐌 SLOWDOWN_DETECTED: Batch size reduced due to signals", logFields...)
 			} else {
 				log.Info("🐌 Throttling: Adjusted batch size",

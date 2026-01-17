@@ -179,6 +179,12 @@ type NamespaceLifecyclePolicySpec struct {
 	// Only applies when action is Resume.
 	// +optional
 	AdaptiveThrottling *AdaptiveThrottlingConfig `json:"adaptiveThrottling,omitempty"`
+
+	// preConditions defines requirements that must be met before Resume operations can proceed.
+	// Only applies when action is Resume.
+	// Checks app readiness and health endpoints before resuming the namespace.
+	// +optional
+	PreConditions *PreConditionsConfig `json:"preConditions,omitempty"`
 }
 
 // TerminationGracePeriodConfig defines terminationGracePeriodSeconds for different resource types.
@@ -460,6 +466,68 @@ type ContainerRestartsCheckConfig struct {
 	SlowdownPercent int32 `json:"slowdownPercent,omitempty"`
 }
 
+// PreConditionsConfig defines requirements that must be met before Resume operations can proceed.
+// Only applies when action is Resume.
+type PreConditionsConfig struct {
+	// enabled activates pre-condition checking before Resume operations
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// appReadinessChecks lists apps that must be ready before resuming
+	// Format: "namespace.name" (e.g., "production.database")
+	// Checks Deployment or StatefulSet readiness (all replicas ready, conditions met)
+	// The operator will check for Deployment first, then StatefulSet if not found.
+	// +optional
+	AppReadinessChecks []string `json:"appReadinessChecks,omitempty"`
+
+	// healthEndpointChecks lists HTTP endpoints that must return healthy status
+	// Format: "http://service-name.namespace.svc.cluster.local:port/path" or "https://..."
+	// Default: expects 200-299 status codes
+	// +optional
+	HealthEndpointChecks []HealthEndpointCheck `json:"healthEndpointChecks,omitempty"`
+
+	// checkInterval defines how often to check pre-conditions (in seconds)
+	// Default: 5
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=60
+	CheckInterval int32 `json:"checkInterval,omitempty"`
+
+	// timeoutSeconds is the maximum time to wait for pre-conditions (in seconds)
+	// If 0 or not set, waits indefinitely
+	// Default: 0 (wait indefinitely)
+	// +optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=86400
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+
+// HealthEndpointCheck defines an HTTP health endpoint to check
+type HealthEndpointCheck struct {
+	// url is the full URL to check (http:// or https://)
+	// Examples:
+	//   - "http://database.production.svc.cluster.local:8080/health"
+	//   - "https://api.staging.svc.cluster.local/ready"
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^https?://`
+	URL string `json:"url"`
+
+	// expectedStatusCodes lists HTTP status codes that indicate healthy
+	// Default: [200, 201, 202, 204]
+	// +optional
+	ExpectedStatusCodes []int32 `json:"expectedStatusCodes,omitempty"`
+
+	// timeoutSeconds is the HTTP request timeout for this endpoint
+	// Default: 5
+	// +optional
+	// +kubebuilder:default=5
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=30
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+
 // NamespaceLifecyclePolicyStatus defines the observed state of NamespaceLifecyclePolicy.
 type NamespaceLifecyclePolicyStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
@@ -536,6 +604,11 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	StartupResumeDelayStartedAt *metav1.Time `json:"startupResumeDelayStartedAt,omitempty"`
 
+	// preConditionsStatus tracks pre-condition checking progress
+	// Only populated when preConditions is enabled
+	// +optional
+	PreConditionsStatus *PreConditionsStatus `json:"preConditionsStatus,omitempty"`
+
 	// conditions represent the current state of the NamespaceLifecyclePolicy resource.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
@@ -574,6 +647,25 @@ type AdaptiveProgressStatus struct {
 	LastCheckTime *metav1.Time `json:"lastCheckTime,omitempty"`
 
 	// message provides human-readable progress information
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// PreConditionsStatus tracks the progress of pre-condition checking
+type PreConditionsStatus struct {
+	// checking indicates pre-conditions are being checked
+	// +optional
+	Checking bool `json:"checking,omitempty"`
+
+	// lastCheckedAt is when pre-conditions were last checked
+	// +optional
+	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
+
+	// passed indicates all pre-conditions have passed
+	// +optional
+	Passed bool `json:"passed,omitempty"`
+
+	// message provides details about pre-condition status
 	// +optional
 	Message string `json:"message,omitempty"`
 }

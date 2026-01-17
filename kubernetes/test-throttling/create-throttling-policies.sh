@@ -30,6 +30,9 @@ fi
 NAMESPACES=("$@")
 NAMESPACE_COUNT=${#NAMESPACES[@]}
 
+# Namespace that should have pre-conditions (default: test2, can be overridden with PRECONDITION_NS env var)
+PRECONDITION_NS="${PRECONDITION_NS:-test2}"
+
 echo "====================================="
 echo "Creating Throttling Policies"
 echo "====================================="
@@ -39,6 +42,9 @@ echo "Action:          Freeze"
 echo "StartupPolicy:   Resume"
 echo "Priority:        1, 2, 3, ... (sequential, max 1000)"
 echo "ResumeDelay:     ${DELAY}s (same for all policies)"
+if [[ " ${NAMESPACES[*]} " =~ " ${PRECONDITION_NS} " ]]; then
+    echo "PreCondition NS: $PRECONDITION_NS (will wait for pre-condition.slow-app)"
+fi
 echo "====================================="
 
 # === CREATE POLICIES ===
@@ -61,7 +67,11 @@ for NS in "${NAMESPACES[@]}"; do
     echo "  OperationID:   $OPERATION_ID"
     echo "  Priority:      $PRIORITY"
     echo "  ResumeDelay:   ${DELAY}s"
+    if [[ "$NS" == "$PRECONDITION_NS" ]]; then
+        echo "  PreConditions: Enabled (waiting for pre-condition.slow-app)"
+    fi
 
+    # Build the base YAML (common for all policies)
     cat <<EOF | kubectl apply -f -
 apiVersion: apps.ops.dev/v1alpha1
 kind: NamespaceLifecyclePolicy
@@ -93,13 +103,13 @@ spec:
     enabled: true
 
     # Start with 3 workloads at a time
-    initialBatchSize: 3
+    initialBatchSize: 6
 
     # Never go below 1 workload per batch
-    minBatchSize: 1
+    minBatchSize: 2
 
     # Wait 5 seconds between batches
-    batchInterval: 3
+    batchInterval: 5
 
     # Signal monitoring
     signalChecks:
@@ -127,9 +137,9 @@ spec:
         memoryThresholdPercent: 80
         slowdownPercent: 60
         scrape:
-          source: ":9090/metrics"
-          cpu: "cpu_usages.percentage"
-          mem: "memory_usages.percentage"
+          source: kubelet   # ":9090/metrics"
+          #cpu: "cpu_usages.percentage"
+          #mem: "memory_usages.percentage"
 
       # Signal 4: Pending Pods (Info - SLOW DOWN)
       # CLUSTER-WIDE: Counts resource-constrained pending pods across ALL namespaces
@@ -157,6 +167,19 @@ spec:
     matchLabels:
       app: test-throttle
 EOF
+
+    # Add pre-conditions only for the specified namespace
+    if [[ "$NS" == "$PRECONDITION_NS" ]]; then
+        kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p='
+spec:
+  preConditions:
+    enabled: true
+    appReadinessChecks:
+      - "pre-condition.slow-app"
+    checkInterval: 5
+    timeoutSeconds: 0
+'
+    fi
 
     # Increment priority by 1 for next namespace (delay stays the same for all)
     PRIORITY=$((PRIORITY + 1))

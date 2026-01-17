@@ -304,6 +304,83 @@ spec:
                   operationId is an optional identifier for this operation.
                   Can be used for tracking and correlation purposes.
                 type: string
+              preConditions:
+                description: |-
+                  preConditions defines requirements that must be met before Resume operations can proceed.
+                  Only applies when action is Resume.
+                  Checks app readiness and health endpoints before resuming the namespace.
+                properties:
+                  appReadinessChecks:
+                    description: |-
+                      appReadinessChecks lists apps that must be ready before resuming
+                      Format: "namespace.name" (e.g., "production.database")
+                      Checks Deployment or StatefulSet readiness (all replicas ready, conditions met)
+                      The operator will check for Deployment first, then StatefulSet if not found.
+                    items:
+                      type: string
+                    type: array
+                  checkInterval:
+                    default: 5
+                    description: |-
+                      checkInterval defines how often to check pre-conditions (in seconds)
+                      Default: 5
+                    format: int32
+                    maximum: 60
+                    minimum: 1
+                    type: integer
+                  enabled:
+                    description: enabled activates pre-condition checking before Resume
+                      operations
+                    type: boolean
+                  healthEndpointChecks:
+                    description: |-
+                      healthEndpointChecks lists HTTP endpoints that must return healthy status
+                      Format: "http://service-name.namespace.svc.cluster.local:port/path" or "https://..."
+                      Default: expects 200-299 status codes
+                    items:
+                      description: HealthEndpointCheck defines an HTTP health endpoint
+                        to check
+                      properties:
+                        expectedStatusCodes:
+                          description: |-
+                            expectedStatusCodes lists HTTP status codes that indicate healthy
+                            Default: [200, 201, 202, 204]
+                          items:
+                            format: int32
+                            type: integer
+                          type: array
+                        timeoutSeconds:
+                          default: 5
+                          description: |-
+                            timeoutSeconds is the HTTP request timeout for this endpoint
+                            Default: 5
+                          format: int32
+                          maximum: 30
+                          minimum: 1
+                          type: integer
+                        url:
+                          description: |-
+                            url is the full URL to check (http:// or https://)
+                            Examples:
+                              - "http://database.production.svc.cluster.local:8080/health"
+                              - "https://api.staging.svc.cluster.local/ready"
+                          pattern: ^https?://
+                          type: string
+                      required:
+                      - url
+                      type: object
+                    type: array
+                  timeoutSeconds:
+                    default: 0
+                    description: |-
+                      timeoutSeconds is the maximum time to wait for pre-conditions (in seconds)
+                      If 0 or not set, waits indefinitely
+                      Default: 0 (wait indefinitely)
+                    format: int32
+                    maximum: 86400
+                    minimum: 0
+                    type: integer
+                type: object
               selector:
                 description: |-
                   selector is a label selector to filter which Deployments and StatefulSets
@@ -671,6 +748,25 @@ spec:
                 - Resumed
                 - Failed
                 type: string
+              preConditionsStatus:
+                description: |-
+                  preConditionsStatus tracks pre-condition checking progress
+                  Only populated when preConditions is enabled
+                properties:
+                  checking:
+                    description: checking indicates pre-conditions are being checked
+                    type: boolean
+                  lastCheckedAt:
+                    description: lastCheckedAt is when pre-conditions were last checked
+                    format: date-time
+                    type: string
+                  message:
+                    description: message provides details about pre-condition status
+                    type: string
+                  passed:
+                    description: passed indicates all pre-conditions have passed
+                    type: boolean
+                type: object
               startupNodesWaited:
                 description: startupNodesWaited records how many seconds we waited
                   for nodes during startup
