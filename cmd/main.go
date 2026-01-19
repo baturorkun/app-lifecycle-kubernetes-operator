@@ -79,6 +79,24 @@ func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, re
 
 	// Wait for this policy to complete (delay + resume) - only if startupPolicy is Resume
 	if latestPolicy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyResume {
+		// Check if pre-conditions are enabled in non-blocking mode
+		// Default is blocking (true), so only non-blocking if explicitly set to false
+		nonBlockingPreConditions := false
+		if latestPolicy.Spec.PreConditions != nil && latestPolicy.Spec.PreConditions.Enabled {
+			if latestPolicy.Spec.PreConditions.BlockPriorityChain != nil && *latestPolicy.Spec.PreConditions.BlockPriorityChain == false {
+				nonBlockingPreConditions = true
+				logger.Info("🚀 Pre-conditions in non-blocking mode - skipping wait, reconcile loop will handle resume",
+					"policy", latestPolicy.Name)
+			}
+		}
+
+		// If non-blocking pre-conditions, don't wait - let reconcile loop handle it
+		if nonBlockingPreConditions {
+			logger.Info("✅ Policy processing complete (non-blocking pre-conditions - reconcile loop will continue)",
+				"policy", latestPolicy.Name)
+			return
+		}
+
 		logger.Info("⏳ Waiting for policy to complete", "policy", latestPolicy.Name, "priority", priority, "delay", latestPolicy.Spec.StartupResumeDelay.Duration)
 
 		// Wait for delay to complete (if any) - use time.Sleep instead of polling
@@ -229,6 +247,30 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	}
 
 	setupLog.Info("Startup policy check completed")
+
+	// Trigger reconciles for policies with pending pre-conditions
+	// This ensures the reconcile loop picks up and continues checking
+	pendingList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
+	if err := k8sClient.List(ctx, pendingList); err != nil {
+		setupLog.Error(err, "Failed to list policies for pending pre-conditions check")
+	} else {
+		for i := range pendingList.Items {
+			p := &pendingList.Items[i]
+			if p.Status.PreConditionsStatus != nil && p.Status.PreConditionsStatus.Checking {
+				setupLog.Info("🔄 Triggering reconcile for policy with pending pre-conditions",
+					"policy", p.Name)
+				// Update an annotation to trigger the reconcile
+				if p.Annotations == nil {
+					p.Annotations = make(map[string]string)
+				}
+				p.Annotations["apps.ops.dev/precondition-trigger"] = time.Now().Format(time.RFC3339)
+				if err := k8sClient.Update(ctx, p); err != nil {
+					setupLog.Error(err, "Failed to trigger reconcile for policy", "policy", p.Name)
+				}
+			}
+		}
+	}
+
 	return nil
 }
 

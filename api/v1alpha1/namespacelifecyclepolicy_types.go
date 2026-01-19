@@ -502,6 +502,13 @@ type PreConditionsConfig struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=86400
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+
+	// blockPriorityChain controls whether pre-conditions block the startup resume priority chain.
+	// When true (default), the operator waits for pre-conditions before proceeding to next priority groups.
+	// When false, the operator continues processing other policies while checking pre-conditions asynchronously.
+	// Default: true (blocks the chain)
+	// +optional
+	BlockPriorityChain *bool `json:"blockPriorityChain,omitempty"`
 }
 
 // HealthEndpointCheck defines an HTTP health endpoint to check

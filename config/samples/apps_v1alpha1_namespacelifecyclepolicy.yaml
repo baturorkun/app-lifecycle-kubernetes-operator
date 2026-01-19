@@ -239,3 +239,10 @@ spec:
   #   # If 0 or not set, waits indefinitely
   #   # Default: 0 (wait indefinitely)
   #   timeoutSeconds: 0
+  #
+  #   # blockPriorityChain controls whether pre-conditions block the startup resume priority chain.
+  #   # When true (default), the operator waits for pre-conditions before proceeding to next priority groups.
+  #   # When false, the operator continues processing other policies while checking pre-conditions asynchronously.
+  #   # Default: true (blocks the chain)
+  #   # Example: Set to false to allow test3, test4 to continue while test2 waits for pre-conditions
+  #   blockPriorityChain: true

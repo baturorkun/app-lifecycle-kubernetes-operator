@@ -319,6 +319,13 @@ spec:
                     items:
                       type: string
                     type: array
+                  blockPriorityChain:
+                    description: |-
+                      blockPriorityChain controls whether pre-conditions block the startup resume priority chain.
+                      When true (default), the operator waits for pre-conditions before proceeding to next priority groups.
+                      When false, the operator continues processing other policies while checking pre-conditions asynchronously.
+                      Default: true (blocks the chain)
+                    type: boolean
                   checkInterval:
                     default: 5
                     description: |-

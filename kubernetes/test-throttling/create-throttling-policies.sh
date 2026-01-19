@@ -174,10 +174,11 @@ EOF
 spec:
   preConditions:
     enabled: true
+    blockPriorityChain: false
     appReadinessChecks:
       - "pre-condition.slow-app"
     checkInterval: 5
-    timeoutSeconds: 0
+    timeoutSeconds: 600
 '
     fi
 
