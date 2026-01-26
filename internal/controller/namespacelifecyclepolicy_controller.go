@@ -584,7 +584,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 
 			if blockPriorityChain {
 				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, policy); err != nil {
+				if err := r.waitForPreConditions(ctx, policy, true); err != nil {
 					// Check if cancelled due to Freeze action
 					if strings.Contains(err.Error(), "cancelled") {
 						log.Info("Pre-conditions cancelled - action changed, returning to let reconcile handle new action")
@@ -955,7 +955,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 				if blockPriorityChain {
 					// Blocking mode: wait for pre-conditions synchronously
-					if err := r.waitForPreConditions(ctx, &policy); err != nil {
+					if err := r.waitForPreConditions(ctx, &policy, true); err != nil {
 						// Check if cancelled due to Freeze action
 						if strings.Contains(err.Error(), "cancelled") {
 							log.Info("Pre-conditions cancelled during delayed startup resume - action changed")
@@ -1526,7 +1526,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 			if blockPriorityChain {
 				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, &policy); err != nil {
+				if err := r.waitForPreConditions(ctx, &policy, false); err != nil {
 					// Check if cancelled due to action change (e.g., Freeze)
 					if strings.Contains(err.Error(), "cancelled") {
 						log.Info("Pre-conditions cancelled - action changed, requeuing to handle new action")
@@ -2357,7 +2357,8 @@ func (r *NamespaceLifecyclePolicyReconciler) checkPreConditions(ctx context.Cont
 
 // waitForPreConditions waits for all pre-conditions to pass
 // Returns error if timeout is reached or fatal error occurs
-func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
+// isStartupOperation: if true, ignores spec.action changes (startup operations only respect spec.startupPolicy)
+func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, isStartupOperation bool) error {
 	log := logf.FromContext(ctx)
 
 	if policy.Spec.PreConditions == nil || !policy.Spec.PreConditions.Enabled {
@@ -2424,19 +2425,29 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Co
 				log.Error(err, "Failed to re-fetch policy during pre-conditions check")
 				// Continue with the old policy reference
 			} else {
-				// Check if action changed to Freeze - cancel waiting
-				if latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
-					log.Info("🛑 Action changed to Freeze - cancelling pre-conditions wait",
-						"policy", policy.Name)
-					now := metav1.Now()
-					status.Checking = false
-					status.Passed = false
-					status.LastCheckedAt = &now
-					status.Message = "Pre-conditions check cancelled - Freeze action received"
-					if updateErr := r.updatePreConditionsStatus(ctx, latestPolicy, status); updateErr != nil {
-						log.Error(updateErr, "Failed to update pre-conditions status")
+				// Only check for action changes during manual operations
+				// During startup operations, spec.action is irrelevant - only spec.startupPolicy matters
+				if !isStartupOperation {
+					// Check if there's a NEW manual operation (operationId changed) with action=Freeze
+					// Only cancel if this is a new operation, not a stale one
+					hasNewOperation := latestPolicy.Spec.OperationId != "" &&
+						latestPolicy.Spec.OperationId != latestPolicy.Status.LastHandledOperationId
+
+					if hasNewOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
+						log.Info("🛑 New manual Freeze operation detected - cancelling pre-conditions wait",
+							"policy", policy.Name,
+							"newOperationId", latestPolicy.Spec.OperationId,
+							"lastHandledOperationId", latestPolicy.Status.LastHandledOperationId)
+						now := metav1.Now()
+						status.Checking = false
+						status.Passed = false
+						status.LastCheckedAt = &now
+						status.Message = "Pre-conditions check cancelled - new Freeze operation received"
+						if updateErr := r.updatePreConditionsStatus(ctx, latestPolicy, status); updateErr != nil {
+							log.Error(updateErr, "Failed to update pre-conditions status")
+						}
+						return fmt.Errorf("pre-conditions cancelled: new manual Freeze operation")
 					}
-					return fmt.Errorf("pre-conditions cancelled: action changed to Freeze")
 				}
 
 				// Check if pre-conditions were disabled
