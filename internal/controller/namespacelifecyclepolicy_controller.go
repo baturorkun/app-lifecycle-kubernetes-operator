@@ -452,13 +452,22 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		})
 	}
 
-	// NOTE: We do NOT check if Phase == desiredPhase and skip
-	// Reason: Phase can be stale (from before operator restart)
-	// Better to always apply startup policy - the freeze/resume functions are idempotent anyway
-	// They will skip if workloads are already in the desired state
+	// If requested action is Resume and the policy is already in Resumed phase, ignore it.
+	if action == appsv1alpha1.LifecycleActionResume && policy.Status.Phase == appsv1alpha1.PhaseResumed {
+		log.Info("Already resumed, no startup action needed", "policy", policy.Name)
+		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+			patchBase := latestPolicy.DeepCopy()
+			latestPolicy.Status.LastStartupAction = "NO_ACTION_ALREADY_RESUMED"
+			latestPolicy.Status.LastStartupAt = &now
+			return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+		})
+	}
 
 	// Apply startupResumeDelay if this is a Resume startup action
-	// Set status fields instead of annotations - cleaner and follows Kubernetes best practices
 	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.StartupResumeDelay.Duration > 0 {
 		log.Info("⏱️ Startup resume delay configured for startup policy - setting status for Reconcile loop",
 			"delay", policy.Spec.StartupResumeDelay.Duration,
@@ -556,6 +565,9 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		// Startup policy is independent of manual operations (spec.action/operationId)
 		log.Info("⏸️ Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
+		// FILTER: Only count and process workloads that were actually frozen
+		deployments, statefulSets = r.filterWorkloadsRequiringResume(deployments, statefulSets)
+
 		// Very prominent log when startup resume begins
 		priority := policy.Spec.StartupResumePriority
 		if priority == 0 {
@@ -1432,29 +1444,21 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		"deployments", len(deployments.Items),
 		"statefulsets", len(statefulSets.Items))
 
-	// Check if no resources found
+	// Check if no resources found (Initial check before filtering)
 	if len(deployments.Items) == 0 && len(statefulSets.Items) == 0 {
 		msg := "No deployments or statefulsets found in namespace"
 		if policy.Spec.Selector != nil {
 			msg = "No resources matched the selector in namespace"
-			log.Info(msg,
-				"namespace", policy.Spec.TargetNamespace,
-				"selector", policy.Spec.Selector)
-		} else {
-			log.Info(msg, "namespace", policy.Spec.TargetNamespace)
 		}
+		log.Info(msg, "namespace", policy.Spec.TargetNamespace)
 
-		// Update status - not failed, just nothing to do
 		phase := appsv1alpha1.PhaseFrozen
 		if policy.Spec.Action == appsv1alpha1.LifecycleActionResume {
 			phase = appsv1alpha1.PhaseResumed
 		}
 		if err := r.updateStatus(ctx, &policy, phase, msg, false); err != nil {
 			log.Error(err, "Failed to update status")
-			return ctrl.Result{}, err
 		}
-
-		log.Info("No action taken, no resources found", "action", policy.Spec.Action)
 		return ctrl.Result{}, nil
 	}
 
@@ -1504,6 +1508,22 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 	case appsv1alpha1.LifecycleActionResume:
+		// FILTER: Only count and process workloads that were actually frozen
+		deployments, statefulSets = r.filterWorkloadsRequiringResume(deployments, statefulSets)
+
+		// Check if no workloads require resume after filtering
+		if len(deployments.Items) == 0 && len(statefulSets.Items) == 0 {
+			log.Info("No workloads require resume (none were frozen or all already resumed)",
+				"namespace", policy.Spec.TargetNamespace)
+
+			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseResumed,
+				"No workloads require resume (all already resumed)", false); err != nil {
+				log.Error(err, "Failed to update status")
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, nil
+		}
+
 		// Check pre-conditions before resuming
 		if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
 			// Check if pre-conditions should block
@@ -2533,4 +2553,24 @@ func (r *NamespaceLifecyclePolicyReconciler) updatePreConditionsStatus(ctx conte
 
 		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 	})
+}
+
+// filterWorkloadsRequiringResume filters deployments and statefulsets that have the original replicas annotation
+func (r *NamespaceLifecyclePolicyReconciler) filterWorkloadsRequiringResume(
+	deployments *appsv1.DeploymentList,
+	statefulSets *appsv1.StatefulSetList,
+) (*appsv1.DeploymentList, *appsv1.StatefulSetList) {
+	filteredDeps := &appsv1.DeploymentList{Items: []appsv1.Deployment{}}
+	for i := range deployments.Items {
+		if _, exists := deployments.Items[i].Annotations[appsv1alpha1.AnnotationOriginalReplicas]; exists {
+			filteredDeps.Items = append(filteredDeps.Items, deployments.Items[i])
+		}
+	}
+	filteredSts := &appsv1.StatefulSetList{Items: []appsv1.StatefulSet{}}
+	for i := range statefulSets.Items {
+		if _, exists := statefulSets.Items[i].Annotations[appsv1alpha1.AnnotationOriginalReplicas]; exists {
+			filteredSts.Items = append(filteredSts.Items, statefulSets.Items[i])
+		}
+	}
+	return filteredDeps, filteredSts
 }
