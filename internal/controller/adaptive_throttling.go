@@ -101,47 +101,10 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 	// Process workloads in adaptive batches
 	for resumedCount < totalWorkloads {
 		// 0. Check for manual override/abort
-		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
-			log.Error(err, "Failed to re-fetch policy to check for manual override")
-		} else {
-			// PRIORITY LOGIC:
-			// 1. Is there a PENDING manual operation?
-			isManualPending := latestPolicy.Spec.OperationId != "" &&
-				latestPolicy.Status.LastHandledOperationId != latestPolicy.Spec.OperationId
-
-			// 2. Should we abort?
-			// - If this is a Startup Resume, ANY pending manual action takes priority.
-			// - If this is a Manual Resume, only a DIFFERENT manual action (new OpId) takes priority.
-			shouldAbort := false
-			reason := ""
-
-			if isManualPending {
-				if isStartupOperation {
-					shouldAbort = true
-					reason = "Manual command takes precedence over Startup Resume"
-				} else if latestPolicy.Spec.OperationId != policy.Spec.OperationId {
-					shouldAbort = true
-					reason = "Newer manual command detected"
-				}
-			}
-
-			// 3. For Manual resumes: also abort if action changed to Freeze (even stale)
-			// But for Startup resumes: ONLY abort if there's a pending action, not on stale freezes.
-			// This allows startup policy to resume even when spec.action was left as Freeze from a previous manual op.
-			if !isStartupOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze && !shouldAbort {
-				shouldAbort = true
-				reason = "Action is now Freeze"
-			}
-
-			if shouldAbort {
-				log.Info("🛑 Manual override detected - aborting active resume process",
-					"reason", reason,
-					"newAction", latestPolicy.Spec.Action,
-					"newOperationId", latestPolicy.Spec.OperationId,
-					"isStartup", isStartupOperation)
-				return fmt.Errorf("operation aborted due to manual override")
-			}
+		if shouldAbort, err := r.checkManualOverride(ctx, policy, isStartupOperation); err != nil {
+			log.Error(err, "Failed to check for manual override")
+		} else if shouldAbort {
+			return fmt.Errorf("operation aborted due to manual override")
 		}
 
 		// 1. Collect signals (targetNamespace-scoped for container restarts)
@@ -259,6 +222,15 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 
 		// 5. Resume workloads in this batch
 		for _, workload := range batch {
+			// PER-WORKLOAD CANCELLATION CHECK to prevent race conditions during batch processing
+			// This closes the window where a Freeze command comes in while we are iterating through a batch
+			if shouldAbort, err := r.checkManualOverride(ctx, policy, isStartupOperation); err != nil {
+				log.Error(err, "Failed to check manual override inside batch")
+				// Don't hard fail on check error, but log it
+			} else if shouldAbort {
+				return fmt.Errorf("operation aborted due to manual override")
+			}
+
 			progress := fmt.Sprintf("[%d/%d]", resumedCount+1, totalWorkloads)
 			if workload.IsDeployment {
 				log.Info("🚀 Resuming deployment",
