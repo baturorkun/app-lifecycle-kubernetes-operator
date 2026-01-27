@@ -2425,29 +2425,27 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Co
 				log.Error(err, "Failed to re-fetch policy during pre-conditions check")
 				// Continue with the old policy reference
 			} else {
-				// Only check for action changes during manual operations
-				// During startup operations, spec.action is irrelevant - only spec.startupPolicy matters
-				if !isStartupOperation {
-					// Check if there's a NEW manual operation (operationId changed) with action=Freeze
-					// Only cancel if this is a new operation, not a stale one
-					hasNewOperation := latestPolicy.Spec.OperationId != "" &&
-						latestPolicy.Spec.OperationId != latestPolicy.Status.LastHandledOperationId
+				// Check if there's a NEW manual operation (operationId changed) with action=Freeze
+				// Even during startup operations, a manual Freeze command should take precedence
+				// Only cancel if this is a new operation, not a stale one
+				hasNewOperation := latestPolicy.Spec.OperationId != "" &&
+					latestPolicy.Spec.OperationId != latestPolicy.Status.LastHandledOperationId
 
-					if hasNewOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
-						log.Info("🛑 New manual Freeze operation detected - cancelling pre-conditions wait",
-							"policy", policy.Name,
-							"newOperationId", latestPolicy.Spec.OperationId,
-							"lastHandledOperationId", latestPolicy.Status.LastHandledOperationId)
-						now := metav1.Now()
-						status.Checking = false
-						status.Passed = false
-						status.LastCheckedAt = &now
-						status.Message = "Pre-conditions check cancelled - new Freeze operation received"
-						if updateErr := r.updatePreConditionsStatus(ctx, latestPolicy, status); updateErr != nil {
-							log.Error(updateErr, "Failed to update pre-conditions status")
-						}
-						return fmt.Errorf("pre-conditions cancelled: new manual Freeze operation")
+				if hasNewOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
+					log.Info("🛑 New manual Freeze operation detected - cancelling pre-conditions wait",
+						"policy", policy.Name,
+						"newOperationId", latestPolicy.Spec.OperationId,
+						"lastHandledOperationId", latestPolicy.Status.LastHandledOperationId,
+						"isStartupOperation", isStartupOperation)
+					now := metav1.Now()
+					status.Checking = false
+					status.Passed = false
+					status.LastCheckedAt = &now
+					status.Message = "Pre-conditions check cancelled - new manual Freeze operation received"
+					if updateErr := r.updatePreConditionsStatus(ctx, latestPolicy, status); updateErr != nil {
+						log.Error(updateErr, "Failed to update pre-conditions status")
 					}
+					return fmt.Errorf("pre-conditions cancelled: new manual Freeze operation")
 				}
 
 				// Check if pre-conditions were disabled
