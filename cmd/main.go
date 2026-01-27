@@ -154,6 +154,7 @@ func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, re
 // This runs once when the operator starts, before the controller starts processing events
 func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	setupLog := ctrl.Log.WithName("startup")
+	startTime := time.Now()
 	setupLog.Info("Applying startup policies for existing resources")
 
 	// Create a client
@@ -246,7 +247,8 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		setupLog.Info("✅ Priority group completed", "priority", priority, "policies", len(group))
 	}
 
-	setupLog.Info("Startup policy check completed")
+	setupLog.Info("Startup policy check completed",
+		"totalElapsedTime", time.Since(startTime))
 
 	// Trigger reconciles for policies with pending pre-conditions
 	// This ensures the reconcile loop picks up and continues checking

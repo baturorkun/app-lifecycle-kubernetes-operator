@@ -302,6 +302,9 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeWithAdaptiveThrottling(
 		// Update root message to show completion
 		latestPolicy.Status.Message = finalMessage
 
+		// Set LastResumeAt to trigger pod balancing window
+		latestPolicy.Status.LastResumeAt = &finalCheckTime
+
 		log.V(1).Info("Updating final adaptive progress",
 			"resumed", totalWorkloads,
 			"total", totalWorkloads)
