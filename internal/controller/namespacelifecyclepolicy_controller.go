@@ -2431,6 +2431,13 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Co
 				hasNewOperation := latestPolicy.Spec.OperationId != "" &&
 					latestPolicy.Spec.OperationId != latestPolicy.Status.LastHandledOperationId
 
+				// SAFETY CHECK: If this is a startup operation and LastHandledOperationId is empty,
+				// this "new" operation is likely just a stale one from before status was created/reset.
+				// We should ignore it to allow startup policy to proceed.
+				if isStartupOperation && latestPolicy.Status.LastHandledOperationId == "" {
+					hasNewOperation = false
+				}
+
 				if hasNewOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
 					log.Info("🛑 New manual Freeze operation detected - cancelling pre-conditions wait",
 						"policy", policy.Name,
