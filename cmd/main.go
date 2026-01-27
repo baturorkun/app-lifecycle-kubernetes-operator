@@ -79,7 +79,7 @@ func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, re
 
 	// Skip waiting if already resumed
 	if latestPolicy.Status.LastStartupAction == "NO_ACTION_ALREADY_RESUMED" {
-		logger.Info("Already resumed, skipping wait", "policy", latestPolicy.Name)
+		logger.Info("⏩ Already resumed, skipping wait", "policy", latestPolicy.Name)
 		return
 	}
 

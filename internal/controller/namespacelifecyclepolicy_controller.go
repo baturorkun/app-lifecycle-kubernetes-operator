@@ -454,7 +454,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 
 	// If requested action is Resume and the policy is already in Resumed phase, ignore it.
 	if action == appsv1alpha1.LifecycleActionResume && policy.Status.Phase == appsv1alpha1.PhaseResumed {
-		log.Info("Already resumed, no startup action needed", "policy", policy.Name)
+		log.Info("⏩ Already resumed, no startup action needed", "policy", policy.Name)
 		return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
