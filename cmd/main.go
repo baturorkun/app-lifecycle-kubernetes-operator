@@ -77,6 +77,12 @@ func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, re
 		return
 	}
 
+	// Skip waiting if already resumed
+	if latestPolicy.Status.LastStartupAction == "NO_ACTION_ALREADY_RESUMED" {
+		logger.Info("Already resumed, skipping wait", "policy", latestPolicy.Name)
+		return
+	}
+
 	// Wait for this policy to complete (delay + resume) - only if startupPolicy is Resume
 	if latestPolicy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyResume {
 		// Check if pre-conditions are enabled in non-blocking mode
