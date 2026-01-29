@@ -1185,6 +1185,17 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		if hasNodeEvent {
+			// DEFER balancing if resume is still in progress (or not yet started)
+			// This prevents "mixing" rolling restarts with an active scale-up operation.
+			if policy.Status.Phase != appsv1alpha1.PhaseResumed {
+				log.Info("⏳ Deferring pod balancing: policy is not in Resumed phase",
+					"currentPhase", policy.Status.Phase,
+					"policy", policy.Name)
+				// Return without marking NodeReadyEventHandledAt, so it gets processed
+				// in the next reconciliation (e.g., when phase changes to Resumed).
+				return ctrl.Result{}, nil
+			}
+
 			log.Info("Operation handled, checking for pod balancing due to node event",
 				"operationId", policy.Spec.OperationId,
 				"policy", policy.Name)
