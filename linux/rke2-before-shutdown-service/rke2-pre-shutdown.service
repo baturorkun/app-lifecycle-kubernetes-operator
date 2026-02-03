@@ -1,0 +1,23 @@
+[Unit]
+Description=Pre-shutdown hook to update NamespaceLifecyclePolicy CRs
+DefaultDependencies=no
+
+# Run BEFORE the system shuts down
+Before=shutdown.target reboot.target halt.target
+
+# Ensure Kubernetes API is still available
+After=network-online.target rke2-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rke2-pre-shutdown.sh
+
+# Do not let the system hang forever
+TimeoutStartSec=30
+
+# systemd waits for this to exit
+RemainAfterExit=yes
+
+[Install]
+WantedBy=shutdown.target reboot.target halt.target
