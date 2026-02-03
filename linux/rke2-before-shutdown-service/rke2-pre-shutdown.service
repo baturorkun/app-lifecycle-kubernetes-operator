@@ -2,22 +2,25 @@
 Description=Pre-shutdown hook to update NamespaceLifecyclePolicy CRs
 DefaultDependencies=no
 
-# Run BEFORE the system shuts down
+# reversed logic: systemd stops things in REVERSE order of 'After'
+# This ensures rke2-server is still running when this service stops
+After=rke2-server.service network-online.target
 Before=shutdown.target reboot.target halt.target
-
-# Ensure Kubernetes API is still available
-After=network-online.target rke2-server.service
-Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/rke2-pre-shutdown.sh
+# ExecStart does nothing, just marks the service as "active"
+ExecStart=/bin/true
 
-# Do not let the system hang forever
-TimeoutStartSec=30
+# This is where your actual script runs
+ExecStop=/usr/local/bin/rke2-pre-shutdown.sh
 
-# systemd waits for this to exit
+# This is critical: keeps the service "active" so ExecStop can trigger later
 RemainAfterExit=yes
 
+# Give your script enough time to scale down all services
+TimeoutStopSec=600 
+
 [Install]
-WantedBy=shutdown.target reboot.target halt.target
+# Start this during normal boot so it's ready to "stop" during shutdown
+WantedBy=multi-user.target
