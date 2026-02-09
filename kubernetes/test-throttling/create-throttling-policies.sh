@@ -33,6 +33,9 @@ NAMESPACE_COUNT=${#NAMESPACES[@]}
 # Namespace that should have pre-conditions (default: test2, can be overridden with PRECONDITION_NS env var)
 PRECONDITION_NS="${PRECONDITION_NS:-test2}"
 
+# Control whether to set freezePriority (default: true, can be disabled with FREEZE_PRIORITY_ENABLED=false)
+FREEZE_PRIORITY_ENABLED="${FREEZE_PRIORITY_ENABLED:-true}"
+
 echo "====================================="
 echo "Creating Throttling Policies"
 echo "====================================="
@@ -40,8 +43,13 @@ echo "Namespaces:      ${NAMESPACES[*]}"
 echo "Count:           $NAMESPACE_COUNT"
 echo "Action:          Freeze"
 echo "StartupPolicy:   Resume"
-echo "Priority:        1, 2, 3, ... (sequential, max 1000)"
-echo "ResumeDelay:     ${DELAY}s (same for all policies)"
+if [[ "$FREEZE_PRIORITY_ENABLED" == "true" ]]; then
+    echo "FreezePriority:  ENABLED (1, 2, 3, ... sequential)"
+else
+    echo "FreezePriority:  DISABLED (using default: 0)"
+fi
+echo "ResumePriority:  1, 2, 3, ... (sequential, max 1000)"
+echo "Delays:          ${DELAY}s (same for freeze and resume)"
 if [[ " ${NAMESPACES[*]} " =~ " ${PRECONDITION_NS} " ]]; then
     echo "PreCondition NS: $PRECONDITION_NS (will wait for pre-condition.slow-app)"
 fi
@@ -65,8 +73,13 @@ for NS in "${NAMESPACES[@]}"; do
     echo "[$PRIORITY/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
     echo "  Target NS:     $NS"
     echo "  OperationID:   $OPERATION_ID"
-    echo "  Priority:      $PRIORITY"
-    echo "  ResumeDelay:   ${DELAY}s"
+    if [[ "$FREEZE_PRIORITY_ENABLED" == "true" ]]; then
+        echo "  FreezePrio:    $PRIORITY"
+    else
+        echo "  FreezePrio:    0 (default)"
+    fi
+    echo "  ResumePrio:    $PRIORITY"
+    echo "  Delays:        ${DELAY}s"
     if [[ "$NS" == "$PRECONDITION_NS" ]]; then
         echo "  PreConditions: Enabled (waiting for pre-condition.slow-app)"
     fi
@@ -91,35 +104,36 @@ spec:
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
 
-  # Startup resume priority (lower number = higher priority)
-  # Sequential priorities: 1000, 2000, 3000, ...
+EOF
+
+    # Add freeze priority only if enabled
+    if [[ "$FREEZE_PRIORITY_ENABLED" == "true" ]]; then
+        kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p="
+spec:
+  freezePriority: $PRIORITY
+  freezeDelay: ${DELAY}s
+"
+    fi
+
+    # Continue building the YAML
+    kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p="
+spec:
   startupResumePriority: $PRIORITY
-
-  # Startup resume delay for staggering (prevents simultaneous resume burst)
   startupResumeDelay: ${DELAY}s
+"
 
-  # Adaptive throttling configuration for Resume operations
+    kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p='
+spec:
   adaptiveThrottling:
     enabled: true
-
-    # Start with 3 workloads at a time
     initialBatchSize: 6
-
-    # Never go below 1 workload per batch
     minBatchSize: 2
-
-    # Wait 5 seconds between batches
     batchInterval: 5
-
-    # Signal monitoring
     signalChecks:
-      # Signal 1: Node Ready Status (Critical - STOP)
       checkNodeReady:
         enabled: true
         waitInterval: 20
         maxWaitTime: 1800
-
-      # Signal 2: Node Pressure (Warning - SLOW DOWN)
       checkNodePressure:
         enabled: true
         pressureTypes:
@@ -127,46 +141,28 @@ spec:
           - DiskPressure
           - PIDPressure
         slowdownPercent: 50
-
-      # Signal 3: Node Usage (Warning - PROACTIVE SLOW DOWN)
-      # Monitors real-time CPU/memory usage from kubelet (~10s lag)
-      # Or from custom metrics server via scrape configuration
       checkNodeUsage:
         enabled: true
         cpuThresholdPercent: 40
         memoryThresholdPercent: 80
         slowdownPercent: 60
         scrape:
-          source: kubelet   # ":9090/metrics"
-          #cpu: "cpu_usages.percentage"
-          #mem: "memory_usages.percentage"
-
-      # Signal 4: Pending Pods (Info - SLOW DOWN)
-      # CLUSTER-WIDE: Counts resource-constrained pending pods across ALL namespaces
+          source: kubelet
       checkPendingPods:
         enabled: true
         threshold: 5
         slowdownPercent: 70
-
-      # Signal 5: Container Restarts (Warning - SLOW DOWN)
-      # CLUSTER-WIDE: Detects pods in CrashLoopBackOff or with high restart counts
       checkContainerRestarts:
         enabled: true
         restartThreshold: 10
         slowdownPercent: 50
-
-    # Monitor worker nodes
     nodeSelector:
       node-role.kubernetes.io/worker: ""
-
-    # Fallback if metrics unavailable
     fallbackOnMetricsUnavailable: true
-
-  # Select workloads with this label
   selector:
     matchLabels:
       app: test-throttle
-EOF
+'
 
     # Add pre-conditions only for the specified namespace
     if [[ "$NS" == "$PRECONDITION_NS" ]]; then
