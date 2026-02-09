@@ -547,6 +547,44 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 	// Apply action
 	switch action {
 	case appsv1alpha1.LifecycleActionFreeze:
+		// Apply freezeDelay if this is a Freeze startup action
+		if policy.Spec.FreezeDelay.Duration > 0 {
+			log.Info("⏱️ Startup freeze delay configured - setting status for Reconcile loop",
+				"delay", policy.Spec.FreezeDelay.Duration,
+				"targetNamespace", policy.Spec.TargetNamespace)
+
+			// Update status with retry to handle concurrent updates
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				// Fetch latest version to avoid conflict errors
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+					return err
+				}
+
+				// Create a patch helper
+				patchBase := latestPolicy.DeepCopy()
+
+				// Mark as pending freeze in status
+				latestPolicy.Status.PendingFreeze = true
+				latestPolicy.Status.FreezeDelayStartedAt = &now
+				latestPolicy.Status.Phase = appsv1alpha1.PhaseIdle
+				latestPolicy.Status.Message = fmt.Sprintf("Waiting %s before starting startup Freeze", policy.Spec.FreezeDelay.Duration)
+				latestPolicy.Status.LastStartupAt = &now
+				latestPolicy.Status.LastStartupAction = "FREEZE_DELAYED"
+
+				return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+			}); err != nil {
+				log.Error(err, "Failed to update status for delayed startup freeze")
+				return err
+			}
+
+			log.Info("✅ Status updated successfully: PendingFreeze=true", "policy", policy.Name)
+
+			// Return success - Reconcile loop will handle the actual freeze after delay
+			return nil
+		}
+
+		// No delay - freeze immediately
 		for i := range deployments.Items {
 			deployment := &deployments.Items[i]
 			if err := r.freezeDeployment(ctx, deployment, policy); err != nil {
@@ -854,6 +892,144 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				// Stop reconciliation
 				return ctrl.Result{}, nil
 			}
+		}
+	}
+
+	// Handle pending freeze with delay using status fields
+	if policy.Status.PendingFreeze {
+		// Check for manual operation override during freeze delay
+		// Only abort if there's a NEW/PENDING manual operation
+		isManualPending := !r.shouldSkipOperation(&policy)
+
+		if isManualPending {
+			log.Info("⚠️ Cancelling pending freeze due to pending manual operation",
+				"action", policy.Spec.Action,
+				"operationId", policy.Spec.OperationId)
+
+			// Update status to cancel the pending freeze
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, req.NamespacedName, latestPolicy); err != nil {
+					return err
+				}
+				patchBase := latestPolicy.DeepCopy()
+				latestPolicy.Status.PendingFreeze = false
+				latestPolicy.Status.LastStartupAction = "FREEZE_CANCELLED_BY_MANUAL_OVERRIDE"
+				return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+			}); err != nil {
+				log.Error(err, "Failed to cancel pending freeze")
+				return ctrl.Result{}, err
+			}
+
+			// Re-fetch the policy to get updated status, then continue to process manual command
+			if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
+				return ctrl.Result{}, err
+			}
+			// Don't return - fall through to process the manual command below
+		} else {
+			// No manual override - continue with freeze delay logic
+			if policy.Status.FreezeDelayStartedAt == nil {
+				log.Error(fmt.Errorf("missing delay start time"), "Pending freeze has no start time in status")
+				// Clear the pending flag
+				policy.Status.PendingFreeze = false
+				if err := r.Status().Update(ctx, &policy); err != nil {
+					log.Error(err, "Failed to clear invalid pending freeze")
+				}
+				return ctrl.Result{}, nil
+			}
+
+			elapsed := time.Since(policy.Status.FreezeDelayStartedAt.Time)
+			if elapsed < policy.Spec.FreezeDelay.Duration {
+				// Delay not yet complete
+				remaining := policy.Spec.FreezeDelay.Duration - elapsed
+				// Log at first check (when elapsed is very small)
+				if elapsed < 2*time.Second {
+					log.Info("⏳ Freeze delay timer started",
+						"totalDelay", policy.Spec.FreezeDelay.Duration,
+						"policy", policy.Name,
+						"targetNamespace", policy.Spec.TargetNamespace)
+				}
+				log.V(1).Info("Freeze delay in progress",
+					"elapsed", elapsed,
+					"remaining", remaining,
+					"policy", policy.Name)
+				return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+
+			// Delay complete! Perform the freeze now
+			log.Info("🧊 Freeze delay completed - executing freeze",
+				"delay", policy.Spec.FreezeDelay.Duration,
+				"policy", policy.Name,
+				"targetNamespace", policy.Spec.TargetNamespace)
+
+			// Execute the freeze operation
+			deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+			if err != nil {
+				log.Error(err, "Failed to list deployments for freeze")
+				return ctrl.Result{}, err
+			}
+
+			statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+			if err != nil {
+				log.Error(err, "Failed to list statefulsets for freeze")
+				return ctrl.Result{}, err
+			}
+
+			log.Info("🧊🧊🧊 ========== FREEZE OPERATION STARTING (AFTER DELAY) ========== 🧊🧊🧊",
+				"policy", policy.Name,
+				"targetNamespace", policy.Spec.TargetNamespace,
+				"freezePriority", policy.Spec.FreezePriority,
+				"freezeDelay", policy.Spec.FreezeDelay.Duration,
+				"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
+
+			// Freeze all deployments
+			for i := range deployments.Items {
+				deployment := &deployments.Items[i]
+				if err := r.freezeDeployment(ctx, deployment, &policy); err != nil {
+					log.Error(err, "Failed to freeze deployment", "name", deployment.Name)
+				}
+			}
+
+			// Freeze all statefulsets
+			for i := range statefulSets.Items {
+				sts := &statefulSets.Items[i]
+				if err := r.freezeStatefulSet(ctx, sts, &policy); err != nil {
+					log.Error(err, "Failed to freeze statefulset", "name", sts.Name)
+				}
+			}
+
+			// Update status with retry on conflict
+			now := metav1.Now()
+			policy.Status.Phase = appsv1alpha1.PhaseFrozen
+			policy.Status.Message = fmt.Sprintf("Freeze applied after delay: completed successfully (%d deployments, %d statefulsets)",
+				len(deployments.Items), len(statefulSets.Items))
+			policy.Status.LastFreezeAt = &now
+			policy.Status.LastStartupAction = "FREEZE_APPLIED"
+			policy.Status.PendingFreeze = false // Clear the pending flag
+
+			// Use retry to handle conflicts
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				// Fetch latest version
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+					return err
+				}
+
+				// Apply status changes to latest version
+				latestPolicy.Status.Phase = policy.Status.Phase
+				latestPolicy.Status.Message = policy.Status.Message
+				latestPolicy.Status.LastFreezeAt = policy.Status.LastFreezeAt
+				latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+				latestPolicy.Status.PendingFreeze = false // Clear the pending flag
+
+				return r.Status().Update(ctx, latestPolicy)
+			}); err != nil {
+				log.Error(err, "Failed to update status after delayed freeze")
+				return ctrl.Result{}, err
+			}
+
+			log.Info("✅ Delayed freeze completed successfully", "policy", policy.Name)
+			return ctrl.Result{}, nil
 		}
 	}
 
@@ -2122,6 +2298,20 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 				oldPolicy, oldOK := e.ObjectOld.(*appsv1alpha1.NamespaceLifecyclePolicy)
 				newPolicy, newOK := e.ObjectNew.(*appsv1alpha1.NamespaceLifecyclePolicy)
 				if oldOK && newOK {
+					// Trigger if PendingFreeze changed from false to true
+					if !oldPolicy.Status.PendingFreeze && newPolicy.Status.PendingFreeze {
+						return true
+					}
+
+					// Trigger if PendingFreeze is true and the delay start time changed
+					// This is crucial for operator restarts where ApplyStartupPolicy resets this timestamp
+					if newPolicy.Status.PendingFreeze && newPolicy.Status.FreezeDelayStartedAt != nil {
+						if oldPolicy.Status.FreezeDelayStartedAt == nil ||
+							!newPolicy.Status.FreezeDelayStartedAt.Equal(oldPolicy.Status.FreezeDelayStartedAt) {
+							return true
+						}
+					}
+
 					// Trigger if PendingStartupResume changed from false to true
 					if !oldPolicy.Status.PendingStartupResume && newPolicy.Status.PendingStartupResume {
 						return true
@@ -2149,11 +2339,11 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 				return false
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
-				// Reconcile on create events IF there is a pending startup resume
+				// Reconcile on create events IF there is a pending startup resume or pending freeze
 				// This ensures that after operator restart, policies already in PendingStartupResume
-				// state are enqueued for reconciliation to start the delay timer.
+				// or PendingFreeze state are enqueued for reconciliation to start the delay timer.
 				policy, ok := e.Object.(*appsv1alpha1.NamespaceLifecyclePolicy)
-				if ok && policy.Status.PendingStartupResume {
+				if ok && (policy.Status.PendingStartupResume || policy.Status.PendingFreeze) {
 					return true
 				}
 				return false

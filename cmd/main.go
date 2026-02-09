@@ -31,6 +31,8 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -59,6 +61,128 @@ func init() {
 
 	utilruntime.Must(appsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// waitForPodsTerminated waits for all pods in a namespace to be terminated (deleted)
+// Returns true if all pods are gone, false if timeout or error
+func waitForPodsTerminated(ctx context.Context, k8sClient client.Client, namespace string, selector *metav1.LabelSelector, logger logr.Logger) bool {
+	maxWaitTime := 10 * time.Minute
+	startTime := time.Now()
+	pollInterval := 3 * time.Second
+
+	logger.Info("⏳ Waiting for all pods to terminate", "namespace", namespace)
+
+	for {
+		// Check timeout
+		if time.Since(startTime) >= maxWaitTime {
+			logger.Info("⚠️ Timeout waiting for pods to terminate", "namespace", namespace, "maxWaitTime", maxWaitTime)
+			return false
+		}
+
+		// List pods in namespace
+		podList := &corev1.PodList{}
+		listOpts := []client.ListOption{
+			client.InNamespace(namespace),
+		}
+
+		// Add label selector if specified
+		if selector != nil {
+			labelSelector, err := metav1.LabelSelectorAsSelector(selector)
+			if err != nil {
+				logger.Error(err, "Failed to convert label selector", "namespace", namespace)
+				return false
+			}
+			listOpts = append(listOpts, client.MatchingLabelsSelector{Selector: labelSelector})
+		}
+
+		if err := k8sClient.List(ctx, podList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list pods", "namespace", namespace)
+			return false
+		}
+
+		// Check if all pods are gone
+		if len(podList.Items) == 0 {
+			logger.Info("✅ All pods terminated", "namespace", namespace, "waited", time.Since(startTime))
+			return true
+		}
+
+		logger.V(1).Info("Pods still terminating", "namespace", namespace, "count", len(podList.Items))
+		time.Sleep(pollInterval)
+	}
+}
+
+// processPolicyWithDelayAndFreeze processes a single freeze policy: applies startup policy, waits for delay, and polls for freeze completion
+func processPolicyWithDelayAndFreeze(ctx context.Context, logger logr.Logger, reconciler *controller.NamespaceLifecyclePolicyReconciler, k8sClient client.Client, policy *appsv1alpha1.NamespaceLifecyclePolicy, priority int32) {
+	logger.Info("Processing freeze policy", "policy", policy.Name, "priority", priority)
+
+	if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
+		logger.Error(err, "Failed to apply startup freeze policy", "policy", policy.Name)
+		return
+	}
+
+	// Re-fetch the policy to get updated status
+	latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+	if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+		logger.Error(err, "Failed to re-fetch policy after ApplyStartupPolicy", "policy", policy.Name)
+		return
+	}
+
+	// Wait for this policy to complete (delay + freeze) - only if startupPolicy is Freeze
+	if latestPolicy.Spec.StartupPolicy == appsv1alpha1.StartupPolicyFreeze {
+		logger.Info("⏳ Waiting for freeze policy to complete", "policy", latestPolicy.Name, "priority", priority, "delay", latestPolicy.Spec.FreezeDelay.Duration)
+
+		// Wait for delay to complete (if any)
+		if latestPolicy.Spec.FreezeDelay.Duration > 0 {
+			delayDuration := latestPolicy.Spec.FreezeDelay.Duration
+			logger.Info("⏱️ Waiting for startup freeze delay", "policy", latestPolicy.Name, "delay", delayDuration)
+			time.Sleep(delayDuration)
+			logger.Info("✅ Freeze delay completed", "policy", latestPolicy.Name)
+
+			// Re-fetch after delay
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				logger.Error(err, "Failed to re-fetch policy after delay", "policy", policy.Name)
+				return
+			}
+		}
+
+		// Wait for freeze to complete (Phase = Frozen)
+		logger.Info("⏳ Waiting for freeze to complete", "policy", latestPolicy.Name)
+		maxWaitTime := 10 * time.Minute
+		startTime := time.Now()
+		pollInterval := 2 * time.Second
+
+		for {
+			// Check timeout
+			if time.Since(startTime) >= maxWaitTime {
+				logger.Info("⚠️ Timeout waiting for freeze to complete", "policy", latestPolicy.Name, "maxWaitTime", maxWaitTime)
+				break
+			}
+
+			// Re-fetch to check status
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				logger.Error(err, "Failed to re-fetch policy during freeze wait", "policy", policy.Name)
+				break
+			}
+
+			// Check if freeze is complete
+			if latestPolicy.Status.Phase == appsv1alpha1.PhaseFrozen {
+				logger.Info("✅ Freeze completed", "policy", latestPolicy.Name, "waited", time.Since(startTime))
+				break
+			}
+
+			// Check if failed
+			if latestPolicy.Status.Phase == appsv1alpha1.PhaseFailed {
+				logger.Info("⚠️ Freeze failed", "policy", latestPolicy.Name)
+				break
+			}
+
+			time.Sleep(pollInterval)
+		}
+
+		// Wait for all pods to be terminated before returning
+		// This ensures the next priority group doesn't start until pods are fully down
+		waitForPodsTerminated(ctx, k8sClient, latestPolicy.Spec.TargetNamespace, latestPolicy.Spec.Selector, logger)
+	}
 }
 
 // processPolicyWithDelayAndResume processes a single policy: applies startup policy, waits for delay, and polls for resume completion
@@ -158,6 +282,7 @@ func processPolicyWithDelayAndResume(ctx context.Context, logger logr.Logger, re
 
 // applyStartupPolicies applies startup policies for all existing NamespaceLifecyclePolicy resources
 // This runs once when the operator starts, before the controller starts processing events
+// Freeze policies are processed first (by freezePriority: 0, 1, 2...), then resume policies (by startupResumePriority)
 func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	setupLog := ctrl.Log.WithName("startup")
 	startTime := time.Now()
@@ -181,76 +306,166 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		Scheme: mgr.GetScheme(),
 	}
 
-	// Sort by priority (lower number = higher priority)
-	// For same priority, sort by creation timestamp (older first)
-	policies := policyList.Items
-	sort.Slice(policies, func(i, j int) bool {
-		// Get priority (default 100 if not specified)
-		priorityI := policies[i].Spec.StartupResumePriority
-		if priorityI == 0 {
-			priorityI = 100
+	// Separate freeze and resume policies
+	var freezePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
+	var resumePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
+	var ignorePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
+
+	for i := range policyList.Items {
+		policy := &policyList.Items[i]
+		switch policy.Spec.StartupPolicy {
+		case appsv1alpha1.StartupPolicyFreeze:
+			freezePolicies = append(freezePolicies, policy)
+		case appsv1alpha1.StartupPolicyResume:
+			resumePolicies = append(resumePolicies, policy)
+		case appsv1alpha1.StartupPolicyIgnore:
+			ignorePolicies = append(ignorePolicies, policy)
 		}
-		priorityJ := policies[j].Spec.StartupResumePriority
-		if priorityJ == 0 {
-			priorityJ = 100
-		}
-
-		// Sort by priority first
-		if priorityI != priorityJ {
-			return priorityI < priorityJ
-		}
-
-		// Same priority: sort by creation timestamp (older first)
-		return policies[i].CreationTimestamp.Before(&policies[j].CreationTimestamp)
-	})
-
-	setupLog.Info("Policies sorted by priority", "count", len(policies))
-
-	// Group policies by priority
-	priorityGroups := make(map[int32][]*appsv1alpha1.NamespaceLifecyclePolicy)
-	priorityOrder := []int32{} // To maintain order
-
-	for i := range policies {
-		policy := &policies[i]
-		priority := policy.Spec.StartupResumePriority
-		if priority == 0 {
-			priority = 100
-		}
-
-		if _, exists := priorityGroups[priority]; !exists {
-			priorityGroups[priority] = []*appsv1alpha1.NamespaceLifecyclePolicy{}
-			priorityOrder = append(priorityOrder, priority)
-		}
-		priorityGroups[priority] = append(priorityGroups[priority], policy)
 	}
 
-	// Sort priority order (lowest number first = highest priority)
-	sort.Slice(priorityOrder, func(i, j int) bool {
-		return priorityOrder[i] < priorityOrder[j]
-	})
+	setupLog.Info("Policies categorized by startup policy",
+		"freeze", len(freezePolicies),
+		"resume", len(resumePolicies),
+		"ignore", len(ignorePolicies))
 
-	setupLog.Info("Policies grouped by priority", "priorityGroups", len(priorityOrder))
+	// ============================================================================
+	// PHASE 1: Process FREEZE policies by priority (0, 1, 2, ...)
+	// ============================================================================
+	if len(freezePolicies) > 0 {
+		setupLog.Info("🥶 ========== PHASE 1: PROCESSING FREEZE POLICIES ==========")
 
-	// Process each priority group sequentially
-	for _, priority := range priorityOrder {
-		group := priorityGroups[priority]
-		setupLog.Info("🚀 Processing priority group", "priority", priority, "policies", len(group))
+		// Sort freeze policies by freezePriority (lower number = freeze first: 0, then 1, then 2...)
+		sort.Slice(freezePolicies, func(i, j int) bool {
+			priorityI := freezePolicies[i].Spec.FreezePriority
+			priorityJ := freezePolicies[j].Spec.FreezePriority
 
-		// Process all policies in this priority group in parallel
-		var wg sync.WaitGroup
-		for _, policy := range group {
-			wg.Add(1)
-			go func(p *appsv1alpha1.NamespaceLifecyclePolicy) {
-				defer wg.Done()
-				// Create a logger with policy name for better traceability
-				policyLogger := setupLog.WithValues("policy", p.Name, "priority", priority)
-				processPolicyWithDelayAndResume(ctx, policyLogger, reconciler, k8sClient, p, priority)
-			}(policy)
+			// Sort by priority first (ascending: 0, 1, 2...)
+			if priorityI != priorityJ {
+				return priorityI < priorityJ
+			}
+
+			// Same priority: sort by creation timestamp (older first)
+			return freezePolicies[i].CreationTimestamp.Before(&freezePolicies[j].CreationTimestamp)
+		})
+
+		// Group freeze policies by priority
+		freezePriorityGroups := make(map[int32][]*appsv1alpha1.NamespaceLifecyclePolicy)
+		freezePriorityOrder := []int32{}
+
+		for _, policy := range freezePolicies {
+			priority := policy.Spec.FreezePriority
+
+			if _, exists := freezePriorityGroups[priority]; !exists {
+				freezePriorityGroups[priority] = []*appsv1alpha1.NamespaceLifecyclePolicy{}
+				freezePriorityOrder = append(freezePriorityOrder, priority)
+			}
+			freezePriorityGroups[priority] = append(freezePriorityGroups[priority], policy)
 		}
 
-		// Wait for all policies in this priority group to complete
-		wg.Wait()
-		setupLog.Info("✅ Priority group completed", "priority", priority, "policies", len(group))
+		// Sort priority order (ascending: 0, 1, 2...)
+		sort.Slice(freezePriorityOrder, func(i, j int) bool {
+			return freezePriorityOrder[i] < freezePriorityOrder[j]
+		})
+
+		setupLog.Info("Freeze policies grouped by priority", "groups", len(freezePriorityOrder))
+
+		// Process each freeze priority group sequentially
+		for _, priority := range freezePriorityOrder {
+			group := freezePriorityGroups[priority]
+			setupLog.Info("🥶 Processing freeze priority group", "priority", priority, "policies", len(group))
+
+			// Process all policies in this priority group in parallel
+			var wg sync.WaitGroup
+			for _, policy := range group {
+				wg.Add(1)
+				go func(p *appsv1alpha1.NamespaceLifecyclePolicy) {
+					defer wg.Done()
+					policyLogger := setupLog.WithValues("policy", p.Name, "freezePriority", priority)
+					processPolicyWithDelayAndFreeze(ctx, policyLogger, reconciler, k8sClient, p, priority)
+				}(policy)
+			}
+
+			// Wait for all policies in this freeze priority group to complete
+			wg.Wait()
+			setupLog.Info("✅ Freeze priority group completed", "priority", priority, "policies", len(group))
+		}
+
+		setupLog.Info("✅ ========== FREEZE POLICIES COMPLETED ==========")
+	}
+
+	// ============================================================================
+	// PHASE 2: Process RESUME policies by priority (lower number = higher priority)
+	// ============================================================================
+	if len(resumePolicies) > 0 {
+		setupLog.Info("🚀 ========== PHASE 2: PROCESSING RESUME POLICIES ==========")
+
+		// Sort resume policies by startupResumePriority (lower number = higher priority)
+		sort.Slice(resumePolicies, func(i, j int) bool {
+			// Get priority (default 100 if not specified)
+			priorityI := resumePolicies[i].Spec.StartupResumePriority
+			if priorityI == 0 {
+				priorityI = 100
+			}
+			priorityJ := resumePolicies[j].Spec.StartupResumePriority
+			if priorityJ == 0 {
+				priorityJ = 100
+			}
+
+			// Sort by priority first
+			if priorityI != priorityJ {
+				return priorityI < priorityJ
+			}
+
+			// Same priority: sort by creation timestamp (older first)
+			return resumePolicies[i].CreationTimestamp.Before(&resumePolicies[j].CreationTimestamp)
+		})
+
+		// Group resume policies by priority
+		resumePriorityGroups := make(map[int32][]*appsv1alpha1.NamespaceLifecyclePolicy)
+		resumePriorityOrder := []int32{}
+
+		for _, policy := range resumePolicies {
+			priority := policy.Spec.StartupResumePriority
+			if priority == 0 {
+				priority = 100
+			}
+
+			if _, exists := resumePriorityGroups[priority]; !exists {
+				resumePriorityGroups[priority] = []*appsv1alpha1.NamespaceLifecyclePolicy{}
+				resumePriorityOrder = append(resumePriorityOrder, priority)
+			}
+			resumePriorityGroups[priority] = append(resumePriorityGroups[priority], policy)
+		}
+
+		// Sort priority order (lowest number first = highest priority)
+		sort.Slice(resumePriorityOrder, func(i, j int) bool {
+			return resumePriorityOrder[i] < resumePriorityOrder[j]
+		})
+
+		setupLog.Info("Resume policies grouped by priority", "groups", len(resumePriorityOrder))
+
+		// Process each resume priority group sequentially
+		for _, priority := range resumePriorityOrder {
+			group := resumePriorityGroups[priority]
+			setupLog.Info("🚀 Processing resume priority group", "priority", priority, "policies", len(group))
+
+			// Process all policies in this priority group in parallel
+			var wg sync.WaitGroup
+			for _, policy := range group {
+				wg.Add(1)
+				go func(p *appsv1alpha1.NamespaceLifecyclePolicy) {
+					defer wg.Done()
+					policyLogger := setupLog.WithValues("policy", p.Name, "startupResumePriority", priority)
+					processPolicyWithDelayAndResume(ctx, policyLogger, reconciler, k8sClient, p, priority)
+				}(policy)
+			}
+
+			// Wait for all policies in this resume priority group to complete
+			wg.Wait()
+			setupLog.Info("✅ Resume priority group completed", "priority", priority, "policies", len(group))
+		}
+
+		setupLog.Info("✅ ========== RESUME POLICIES COMPLETED ==========")
 	}
 
 	setupLog.Info("Startup policy check completed",

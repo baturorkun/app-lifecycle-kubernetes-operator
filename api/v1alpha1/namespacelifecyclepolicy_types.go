@@ -174,6 +174,28 @@ type NamespaceLifecyclePolicySpec struct {
 	// +kubebuilder:validation:Maximum=99999
 	StartupResumePriority int32 `json:"startupResumePriority,omitempty"`
 
+	// freezeDelay specifies how long to wait before starting a Freeze operation.
+	// Applies to both manual freeze operations (action: Freeze) and startup freeze (startupPolicy: Freeze).
+	// Useful for staggering multiple namespace freeze operations to prevent simultaneous shutdowns.
+	// Default: 0s (no delay)
+	// +optional
+	// +kubebuilder:default="0s"
+	FreezeDelay metav1.Duration `json:"freezeDelay,omitempty"`
+
+	// freezePriority defines the priority order for freeze operations.
+	// Lower numbers freeze FIRST (e.g., 0 freezes before 1, then 2, etc.).
+	// Applies to both manual freeze (action: Freeze) and startup freeze (startupPolicy: Freeze).
+	// Default: 0 (highest priority - freezes first)
+	// Policies with the same priority are processed in parallel.
+	// Each priority group waits until all pods are terminated before proceeding to the next priority.
+	// When combined with freezeDelay, policies are processed in priority order (0, 1, 2, ...),
+	// and each policy waits for its delay and freeze completion before the next priority starts.
+	// +optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=99999
+	FreezePriority int32 `json:"freezePriority,omitempty"`
+
 	// adaptiveThrottling enables adaptive throttling during Resume operations
 	// to prevent node overload by monitoring node conditions and pending pods.
 	// Only applies when action is Resume.
@@ -610,6 +632,20 @@ type NamespaceLifecyclePolicyStatus struct {
 	// Used in conjunction with pendingStartupResume to calculate remaining delay time
 	// +optional
 	StartupResumeDelayStartedAt *metav1.Time `json:"startupResumeDelayStartedAt,omitempty"`
+
+	// pendingFreeze indicates whether a freeze operation is pending (waiting for delay or priority)
+	// When true, the operator will wait for the delay period and priority ordering before freezing
+	// +optional
+	PendingFreeze bool `json:"pendingFreeze,omitempty"`
+
+	// freezeDelayStartedAt stores the timestamp when the freeze delay began
+	// Used in conjunction with pendingFreeze to calculate remaining delay time
+	// +optional
+	FreezeDelayStartedAt *metav1.Time `json:"freezeDelayStartedAt,omitempty"`
+
+	// lastFreezeAt stores the timestamp when the last freeze operation completed
+	// +optional
+	LastFreezeAt *metav1.Time `json:"lastFreezeAt,omitempty"`
 
 	// preConditionsStatus tracks pre-condition checking progress
 	// Only populated when preConditions is enabled

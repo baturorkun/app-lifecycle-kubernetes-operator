@@ -1,0 +1,136 @@
+# Example: Freeze Priority and Delay Configuration
+# 
+# This example demonstrates how to use freezePriority and freezeDelay to control
+# the sequence of freeze operations across multiple namespaces.
+#
+# Use Case: Graceful application shutdown in reverse dependency order
+#   - Priority 0: Frontend services (non-critical, freeze first)
+#   - Priority 1: Backend/API services (freeze after frontend)
+#   - Priority 2: Database/storage services (critical, freeze last)
+#
+# Freeze Order: Lower priority numbers freeze FIRST (0 → 1 → 2)
+# Each priority group waits until all pods are terminated before proceeding to next priority.
+#
+# Testing:
+#   1. Apply all policies: kubectl apply -f freeze-priority-example.yaml
+#   2. Trigger freeze by changing action to Freeze or restarting the operator with startupPolicy: Freeze
+#   3. Watch the sequence: kubectl get namespacelifecyclepolicy -A -w
+#   4. Monitor pod termination: kubectl get pods --all-namespaces -w
+#
+---
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: frontend-policy
+  namespace: default
+spec:
+  targetNamespace: frontend
+  action: Resume
+  startupPolicy: Freeze
+  
+  # Freeze Priority Configuration
+  # Priority 0 = Freeze FIRST (highest urgency to shutdown)
+  # Frontend services should freeze before backend services
+  freezePriority: 0
+  
+  # Optional: Add delay before starting freeze
+  # Useful for staggered shutdowns within same priority
+  freezeDelay: 0s
+  
+  # For startup resume after freeze
+  startupResumePriority: 100
+  startupResumeDelay: 0s
+
+---
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: backend-policy
+  namespace: default
+spec:
+  targetNamespace: backend
+  action: Resume
+  startupPolicy: Freeze
+  
+  # Freeze Priority Configuration
+  # Priority 1 = Freeze SECOND (after priority 0)
+  # Backend/API services freeze after frontend is down
+  freezePriority: 1
+  
+  # Optional: 10 second delay before starting freeze
+  freezeDelay: 10s
+  
+  # For startup resume: Higher priority to resume before frontend
+  startupResumePriority: 1
+  startupResumeDelay: 0s
+
+---
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: database-policy
+  namespace: default
+spec:
+  targetNamespace: database
+  action: Resume
+  startupPolicy: Freeze
+  
+  # Freeze Priority Configuration
+  # Priority 2 = Freeze LAST (lowest priority, most critical)
+  # Database/storage services freeze only after all other services are down
+  freezePriority: 2
+  
+  # Optional: 20 second delay to ensure previous priorities are fully terminated
+  freezeDelay: 20s
+  
+  # For startup resume: Highest priority to resume first
+  startupResumePriority: 1
+  startupResumeDelay: 0s
+  
+  # Optional: Custom termination grace period for graceful shutdown
+  terminationGracePeriodSeconds:
+    deployment: 60
+    statefulSet: 120
+
+---
+# Example: Multiple namespaces with same priority (parallel freeze)
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: monitoring-policy
+  namespace: default
+spec:
+  targetNamespace: monitoring
+  action: Resume
+  startupPolicy: Freeze
+  
+  # Same priority as frontend - will freeze in parallel
+  freezePriority: 0
+  freezeDelay: 5s  # Small stagger within same priority
+  
+  startupResumePriority: 100
+  startupResumeDelay: 0s
+
+---
+# Example: Label selector to freeze specific workloads only
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: staging-critical-policy
+  namespace: default
+spec:
+  targetNamespace: staging
+  action: Resume
+  startupPolicy: Freeze
+  
+  # Only freeze deployments/statefulsets with 'tier: critical' label
+  selector:
+    matchLabels:
+      tier: critical
+  
+  # High priority freeze (freeze early)
+  freezePriority: 0
+  freezeDelay: 0s
+  
+  startupResumePriority: 50
+  startupResumeDelay: 0s

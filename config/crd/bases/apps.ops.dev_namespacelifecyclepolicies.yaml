@@ -299,6 +299,29 @@ spec:
                 maximum: 3600
                 minimum: 0
                 type: integer
+              freezeDelay:
+                default: 0s
+                description: |-
+                  freezeDelay specifies how long to wait before starting a Freeze operation.
+                  Applies to both manual freeze operations (action: Freeze) and startup freeze (startupPolicy: Freeze).
+                  Useful for staggering multiple namespace freeze operations to prevent simultaneous shutdowns.
+                  Default: 0s (no delay)
+                type: string
+              freezePriority:
+                default: 0
+                description: |-
+                  freezePriority defines the priority order for freeze operations.
+                  Lower numbers freeze FIRST (e.g., 0 freezes before 1, then 2, etc.).
+                  Applies to both manual freeze (action: Freeze) and startup freeze (startupPolicy: Freeze).
+                  Default: 0 (highest priority - freezes first)
+                  Policies with the same priority are processed in parallel.
+                  Each priority group waits until all pods are terminated before proceeding to the next priority.
+                  When combined with freezeDelay, policies are processed in priority order (0, 1, 2, ...),
+                  and each policy waits for its delay and freeze completion before the next priority starts.
+                format: int32
+                maximum: 99999
+                minimum: 0
+                type: integer
               operationId:
                 description: |-
                   operationId is an optional identifier for this operation.
@@ -694,6 +717,17 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              freezeDelayStartedAt:
+                description: |-
+                  freezeDelayStartedAt stores the timestamp when the freeze delay began
+                  Used in conjunction with pendingFreeze to calculate remaining delay time
+                format: date-time
+                type: string
+              lastFreezeAt:
+                description: lastFreezeAt stores the timestamp when the last freeze
+                  operation completed
+                format: date-time
+                type: string
               lastHandledOperationId:
                 description: |-
                   lastHandledOperationId stores the operation ID of the last successfully handled operation.
@@ -738,6 +772,11 @@ spec:
                   node ready event was processed
                 format: date-time
                 type: string
+              pendingFreeze:
+                description: |-
+                  pendingFreeze indicates whether a freeze operation is pending (waiting for delay or priority)
+                  When true, the operator will wait for the delay period and priority ordering before freezing
+                type: boolean
               pendingStartupResume:
                 description: |-
                   pendingStartupResume indicates whether a startup resume operation is pending with a delay
