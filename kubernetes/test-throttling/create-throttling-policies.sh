@@ -30,8 +30,11 @@ fi
 NAMESPACES=("$@")
 NAMESPACE_COUNT=${#NAMESPACES[@]}
 
-# Namespace that should have pre-conditions (default: test2, can be overridden with PRECONDITION_NS env var)
-PRECONDITION_NS="${PRECONDITION_NS:-test2}"
+# Namespace that should have pre-conditions (optional, set via PRECONDITION_NS env var)
+PRECONDITION_NS="${PRECONDITION_NS:-}"
+
+# App name to check in pre-conditions (optional, set via PRECONDITION_APP env var)
+PRECONDITION_APP="${PRECONDITION_APP:-}"
 
 # Control whether to set freezePriority (default: true, can be disabled with FREEZE_PRIORITY_ENABLED=false)
 FREEZE_PRIORITY_ENABLED="${FREEZE_PRIORITY_ENABLED:-true}"
@@ -50,8 +53,8 @@ else
 fi
 echo "ResumePriority:  1, 2, 3, ... (sequential, max 1000)"
 echo "Delays:          ${DELAY}s (same for freeze and resume)"
-if [[ " ${NAMESPACES[*]} " =~ " ${PRECONDITION_NS} " ]]; then
-    echo "PreCondition NS: $PRECONDITION_NS (will wait for pre-condition.slow-app)"
+if [[ -n "$PRECONDITION_NS" ]] && [[ -n "$PRECONDITION_APP" ]] && [[ " ${NAMESPACES[*]} " =~ " ${PRECONDITION_NS} " ]]; then
+    echo "PreCondition NS: $PRECONDITION_NS (will wait for $PRECONDITION_NS.$PRECONDITION_APP)"
 fi
 echo "====================================="
 
@@ -80,8 +83,8 @@ for NS in "${NAMESPACES[@]}"; do
     fi
     echo "  ResumePrio:    $PRIORITY"
     echo "  Delays:        ${DELAY}s"
-    if [[ "$NS" == "$PRECONDITION_NS" ]]; then
-        echo "  PreConditions: Enabled (waiting for pre-condition.slow-app)"
+    if [[ -n "$PRECONDITION_NS" ]] && [[ -n "$PRECONDITION_APP" ]] && [[ "$NS" == "$PRECONDITION_NS" ]]; then
+        echo "  PreConditions: Enabled (waiting for $NS.$PRECONDITION_APP)"
     fi
 
     # Build the base YAML (common for all policies)
@@ -164,18 +167,18 @@ spec:
       app: test-throttle
 '
 
-    # Add pre-conditions only for the specified namespace
-    if [[ "$NS" == "$PRECONDITION_NS" ]]; then
-        kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p='
+    # Add pre-conditions only if both PRECONDITION_NS and PRECONDITION_APP are set
+    if [[ -n "$PRECONDITION_NS" ]] && [[ -n "$PRECONDITION_APP" ]] && [[ "$NS" == "$PRECONDITION_NS" ]]; then
+        kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p="
 spec:
   preConditions:
     enabled: true
     blockPriorityChain: false
     appReadinessChecks:
-      - "pre-condition.slow-app"
+      - \"$NS.$PRECONDITION_APP\"
     checkInterval: 5
     timeoutSeconds: 600
-'
+"
     fi
 
     # Increment priority by 1 for next namespace (delay stays the same for all)
