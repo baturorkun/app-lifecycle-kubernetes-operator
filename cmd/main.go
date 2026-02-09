@@ -31,7 +31,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -63,29 +63,28 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
-// waitForPodsTerminated waits for all pods in a namespace to be terminated (deleted)
-// Returns true if all pods are gone, false if timeout or error
-func waitForPodsTerminated(ctx context.Context, k8sClient client.Client, namespace string, selector *metav1.LabelSelector, logger logr.Logger) bool {
-	maxWaitTime := 10 * time.Minute
+// waitForReplicasZero waits for all Deployments and StatefulSets in a namespace to have replicas=0
+// This is safer than waiting for pod termination as it doesn't get stuck on terminating pods
+// Returns true if all workloads are scaled to 0, false if timeout or error
+func waitForReplicasZero(ctx context.Context, k8sClient client.Client, namespace string, selector *metav1.LabelSelector, logger logr.Logger) bool {
+	maxWaitTime := 5 * time.Minute
 	startTime := time.Now()
-	pollInterval := 3 * time.Second
+	pollInterval := 2 * time.Second
 
-	logger.Info("⏳ Waiting for all pods to terminate", "namespace", namespace)
+	logger.Info("⏳ Waiting for all workloads to scale to 0 replicas", "namespace", namespace)
 
 	for {
 		// Check timeout
 		if time.Since(startTime) >= maxWaitTime {
-			logger.Info("⚠️ Timeout waiting for pods to terminate", "namespace", namespace, "maxWaitTime", maxWaitTime)
+			logger.Info("⚠️ Timeout waiting for replicas to reach 0", "namespace", namespace, "maxWaitTime", maxWaitTime)
 			return false
 		}
 
-		// List pods in namespace
-		podList := &corev1.PodList{}
+		// Prepare list options with label selector
 		listOpts := []client.ListOption{
 			client.InNamespace(namespace),
 		}
 
-		// Add label selector if specified
 		if selector != nil {
 			labelSelector, err := metav1.LabelSelectorAsSelector(selector)
 			if err != nil {
@@ -95,18 +94,63 @@ func waitForPodsTerminated(ctx context.Context, k8sClient client.Client, namespa
 			listOpts = append(listOpts, client.MatchingLabelsSelector{Selector: labelSelector})
 		}
 
-		if err := k8sClient.List(ctx, podList, listOpts...); err != nil {
-			logger.Error(err, "Failed to list pods", "namespace", namespace)
+		// List Deployments
+		deploymentList := &appsv1.DeploymentList{}
+		if err := k8sClient.List(ctx, deploymentList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list deployments", "namespace", namespace)
 			return false
 		}
 
-		// Check if all pods are gone
-		if len(podList.Items) == 0 {
-			logger.Info("✅ All pods terminated", "namespace", namespace, "waited", time.Since(startTime))
+		// List StatefulSets
+		statefulSetList := &appsv1.StatefulSetList{}
+		if err := k8sClient.List(ctx, statefulSetList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list statefulsets", "namespace", namespace)
+			return false
+		}
+
+		// Check if all Deployments are scaled to 0
+		allDeploymentsZero := true
+		for i := range deploymentList.Items {
+			deploy := &deploymentList.Items[i]
+			// Only check operational replicas (available/ready), not total replicas
+			// This prevents hanging on pods stuck in Terminating state
+			if deploy.Status.AvailableReplicas > 0 || deploy.Status.ReadyReplicas > 0 {
+				allDeploymentsZero = false
+				logger.V(1).Info("Deployment has active replicas",
+					"deployment", deploy.Name,
+					"available", deploy.Status.AvailableReplicas,
+					"ready", deploy.Status.ReadyReplicas)
+			}
+		}
+
+		// Check if all StatefulSets are scaled to 0
+		allStatefulSetsZero := true
+		for i := range statefulSetList.Items {
+			sts := &statefulSetList.Items[i]
+			// Only check ready replicas, not total replicas
+			// This prevents hanging on pods stuck in Terminating state
+			if sts.Status.ReadyReplicas > 0 {
+				allStatefulSetsZero = false
+				logger.V(1).Info("StatefulSet has active replicas",
+					"statefulset", sts.Name,
+					"ready", sts.Status.ReadyReplicas)
+			}
+		}
+
+		// If all workloads are at 0 replicas, we're done
+		if allDeploymentsZero && allStatefulSetsZero {
+			logger.Info("✅ All workloads scaled to 0 replicas",
+				"namespace", namespace,
+				"waited", time.Since(startTime),
+				"deployments", len(deploymentList.Items),
+				"statefulsets", len(statefulSetList.Items))
 			return true
 		}
 
-		logger.V(1).Info("Pods still terminating", "namespace", namespace, "count", len(podList.Items))
+		logger.V(1).Info("Waiting for workloads to scale to 0",
+			"namespace", namespace,
+			"deployments", len(deploymentList.Items),
+			"statefulsets", len(statefulSetList.Items))
 		time.Sleep(pollInterval)
 	}
 }
@@ -179,9 +223,13 @@ func processPolicyWithDelayAndFreeze(ctx context.Context, logger logr.Logger, re
 			time.Sleep(pollInterval)
 		}
 
-		// Wait for all pods to be terminated before returning
-		// This ensures the next priority group doesn't start until pods are fully down
-		waitForPodsTerminated(ctx, k8sClient, latestPolicy.Spec.TargetNamespace, latestPolicy.Spec.Selector, logger)
+		// Wait for all workloads (Deployments/StatefulSets) to be scaled to 0 replicas
+		// This ensures the next priority group doesn't start until workloads are fully scaled down
+		// Using replicas=0 check instead of pod termination to avoid hanging on stuck pods
+		logger.Info("🔍 Verifying workloads scaled to 0", "namespace", latestPolicy.Spec.TargetNamespace)
+		if !waitForReplicasZero(ctx, k8sClient, latestPolicy.Spec.TargetNamespace, latestPolicy.Spec.Selector, logger) {
+			logger.Info("⚠️ Replicas verification timed out, continuing anyway", "namespace", latestPolicy.Spec.TargetNamespace)
+		}
 	}
 }
 
