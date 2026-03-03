@@ -51,7 +51,7 @@ const (
 )
 
 // Phase defines the current phase of the namespace lifecycle operation
-// +kubebuilder:validation:Enum=Idle;Freezing;Frozen;Resuming;Resumed;Failed
+// +kubebuilder:validation:Enum=Idle;Freezing;Frozen;Resuming;Resumed;Failed;Degraded
 type Phase string
 
 const (
@@ -72,6 +72,9 @@ const (
 
 	// PhaseFailed indicates the operation has failed
 	PhaseFailed Phase = "Failed"
+
+	// PhaseDegraded indicates objects have been scaled down due to node failure
+	PhaseDegraded Phase = "Degraded"
 
 	// AnnotationOriginalReplicas stores the original replica count before freezing
 	AnnotationOriginalReplicas = "apps.ops.dev/original-replicas"

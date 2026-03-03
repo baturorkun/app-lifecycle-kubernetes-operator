@@ -544,6 +544,19 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		"deployments", len(deployments.Items),
 		"statefulsets", len(statefulSets.Items))
 
+	// Pre-action check for Node down logic when resuming
+	if action == appsv1alpha1.LifecycleActionResume {
+		deferred, err := r.checkNodesAndDeferResume(ctx, policy, deployments, statefulSets)
+		if err != nil {
+			log.Error(err, "Failed to check node status and defer resume")
+			return err
+		}
+		if deferred {
+			log.Info("Startup resume deferred due to NotReady nodes. Namespaces marked as Degraded and scaled down.")
+			return nil // Let Reconcile take over when nodes are back
+		}
+	}
+
 	// Apply action
 	switch action {
 	case appsv1alpha1.LifecycleActionFreeze:
@@ -1349,6 +1362,120 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 	}
 
+	// =========================================================================
+	// Node Failure and Degraded State Handling
+	// =========================================================================
+
+	// 1. Check for Idle/Resumed policies that need to be Degraded due to Node failures
+	if policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed {
+		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list deployments for node failure check")
+			return ctrl.Result{}, err
+		}
+		statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list statefulsets for node failure check")
+			return ctrl.Result{}, err
+		}
+
+		deferred, err := r.checkNodesAndDeferResume(ctx, &policy, deployments, statefulSets)
+		if err != nil {
+			log.Error(err, "Failed to check node statuses during Reconcile active state")
+			return ctrl.Result{}, err
+		}
+
+		if deferred {
+			log.Info("Namespace marked as Degraded due to NotReady nodes and workloads scaled to zero.")
+			return ctrl.Result{}, nil
+		}
+	}
+
+	// 2. Auto-Resume for Degraded namespaces when nodes become Ready again
+	if policy.Status.Phase == appsv1alpha1.PhaseDegraded {
+		// Verify if nodes are back to a healthy state
+		nodeList := &corev1.NodeList{}
+		if err := r.List(ctx, nodeList); err != nil {
+			log.Error(err, "Failed to list nodes during Degraded Phase check")
+			return ctrl.Result{}, err
+		}
+
+		anyNotReady := false
+		for _, node := range nodeList.Items {
+			if !isNodeReady(&node) {
+				anyNotReady = true
+				break
+			}
+		}
+
+		if anyNotReady {
+			log.V(1).Info("Nodes are still NotReady, namespace remains Degraded", "policy", policy.Name)
+			return ctrl.Result{}, nil
+		}
+
+		log.Info("Nodes are healthy again. Resuming Degraded namespace", "policy", policy.Name)
+
+		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list deployments for Degraded resume")
+			return ctrl.Result{}, err
+		}
+		statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
+		if err != nil {
+			log.Error(err, "Failed to list statefulsets for Degraded resume")
+			return ctrl.Result{}, err
+		}
+
+		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseResuming, "Recovering from Degraded state", false); err != nil {
+			log.Error(err, "Failed to update status to Resuming for Degraded recovery")
+			return ctrl.Result{}, err
+		}
+
+		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
+			log.Info("🚀 Executing Degraded recovery with adaptive throttling", "policy", policy.Name)
+			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets, true); err != nil {
+				if err.Error() == "operation aborted due to manual override" {
+					log.Info("🛑 Degraded recovery aborted due to manual override", "policy", policy.Name)
+					return ctrl.Result{}, nil
+				}
+				log.Error(err, "Failed to resume with adaptive throttling during Degraded recovery")
+				return ctrl.Result{}, err
+			}
+		} else {
+			log.Info("⚡ Executing Degraded recovery without throttling", "policy", policy.Name)
+			for i := range deployments.Items {
+				if err := r.resumeDeployment(ctx, &deployments.Items[i]); err != nil {
+					log.Error(err, "Failed to resume deployment during Degraded recovery", "name", deployments.Items[i].Name)
+				}
+			}
+			for i := range statefulSets.Items {
+				if err := r.resumeStatefulSet(ctx, &statefulSets.Items[i]); err != nil {
+					log.Error(err, "Failed to resume statefulset during Degraded recovery", "name", statefulSets.Items[i].Name)
+				}
+			}
+		}
+
+		now := metav1.Now()
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+				return err
+			}
+			latestPolicy.Status.Phase = appsv1alpha1.PhaseResumed
+			latestPolicy.Status.Message = "Recovered successfully from Degraded state"
+			latestPolicy.Status.LastResumeAt = &now
+			return r.Status().Update(ctx, latestPolicy)
+		})
+
+		if err != nil {
+			log.Error(err, "Failed to update status after Degraded recovery")
+			return ctrl.Result{}, err
+		}
+
+		log.Info("✅ Degraded recovery completed successfully", "policy", policy.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// Check if this operation was already handled
 	if r.shouldSkipOperation(&policy) {
 		// Only check balancing if this reconcile was triggered by a node event
@@ -2138,32 +2265,48 @@ func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Co
 		return nil
 	}
 
-	// Handle recent NotReady transition
+	var requests []reconcile.Request
+	var actionMsg string
+
 	if !nodeReady {
+		actionMsg = "Checking policies for Degraded namespace handling"
 		log.Info("⚠️  Node transitioned to NotReady",
 			"node", node.Name,
-			"action", "Pod balancing may be triggered when node becomes Ready")
-		return nil
+			"action", actionMsg)
+	} else {
+		actionMsg = "Checking policies for pod balancing and Degraded recovery"
+		log.Info("🟢 Node transitioned to Ready",
+			"node", node.Name,
+			"action", actionMsg)
 	}
 
-	// Handle recent Ready transition
-	log.Info("🟢 Node transitioned to Ready",
-		"node", node.Name,
-		"action", "Checking policies for pod balancing")
-
-	// List all NamespaceLifecyclePolicy resources with balancePods=true
+	// List all NamespaceLifecyclePolicy resources
 	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
 	if err := r.List(ctx, policyList); err != nil {
 		log.Error(err, "Failed to list NamespaceLifecyclePolicy resources for node event")
 		return nil
 	}
 
-	var requests []reconcile.Request
 	var candidatePolicies []string
 
 	for i := range policyList.Items {
 		policy := &policyList.Items[i]
-		if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
+
+		needsReconcile := false
+
+		if !nodeReady {
+			// On node NotReady, trigger policies in Idle or Resumed phases
+			if policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed {
+				needsReconcile = true
+			}
+		} else {
+			// On node Ready, trigger policies for balancing OR recovery from Degraded
+			if (policy.Spec.BalancePods && policy.Status.LastResumeAt != nil) || policy.Status.Phase == appsv1alpha1.PhaseDegraded {
+				needsReconcile = true
+			}
+		}
+
+		if needsReconcile {
 			// Update status to mark this reconcile was triggered by node event
 			now := metav1.Now()
 			policy.Status.NodeReadyEventDetectedAt = &now
@@ -2774,4 +2917,126 @@ func (r *NamespaceLifecyclePolicyReconciler) filterWorkloadsRequiringResume(
 		}
 	}
 	return filteredDeps, filteredSts
+}
+
+// checkNodesAndDeferResume checks for NotReady nodes, scales down affected workloads to 0,
+// sets phase to Degraded, and returns true if the resume should be deferred.
+func (r *NamespaceLifecyclePolicyReconciler) checkNodesAndDeferResume(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, deployments *appsv1.DeploymentList, statefulSets *appsv1.StatefulSetList) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	// List all nodes
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return false, fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	notReadyNodes := make(map[string]bool)
+	for _, node := range nodeList.Items {
+		if !isNodeReady(&node) {
+			notReadyNodes[node.Name] = true
+		}
+	}
+
+	if len(notReadyNodes) == 0 {
+		return false, nil // All nodes ready, no defer needed
+	}
+
+	log.Info("Found NotReady nodes during resume check", "notReadyNodesCount", len(notReadyNodes))
+
+	// List pods in the target namespace to see if any are assigned to the failed nodes
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(policy.Spec.TargetNamespace)); err != nil {
+		return false, fmt.Errorf("failed to list pods in namespace %s: %w", policy.Spec.TargetNamespace, err)
+	}
+
+	affectedDeployments := make(map[string]*appsv1.Deployment)
+	affectedStatefulSets := make(map[string]*appsv1.StatefulSet)
+
+	for _, pod := range podList.Items {
+		if pod.Spec.NodeName != "" && notReadyNodes[pod.Spec.NodeName] {
+			// Find owner
+			for _, owner := range pod.OwnerReferences {
+				if owner.Kind == "ReplicaSet" {
+					// Need to find the Deployment that owns this ReplicaSet
+					rs := &appsv1.ReplicaSet{}
+					if err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: pod.Namespace}, rs); err == nil {
+						for _, rsOwner := range rs.OwnerReferences {
+							if rsOwner.Kind == "Deployment" {
+								for i := range deployments.Items {
+									if deployments.Items[i].Name == rsOwner.Name {
+										affectedDeployments[rsOwner.Name] = &deployments.Items[i]
+										break
+									}
+								}
+							}
+						}
+					}
+				} else if owner.Kind == "StatefulSet" {
+					for i := range statefulSets.Items {
+						if statefulSets.Items[i].Name == owner.Name {
+							affectedStatefulSets[owner.Name] = &statefulSets.Items[i]
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(affectedDeployments) == 0 && len(affectedStatefulSets) == 0 {
+		return false, nil // No workloads affected by the down nodes
+	}
+
+	log.Info("Scaling down workloads affected by NotReady nodes",
+		"deployments", len(affectedDeployments),
+		"statefulsets", len(affectedStatefulSets))
+
+	// Scale down affected workloads
+	deferredAny := false
+	for _, dep := range affectedDeployments {
+		if dep.Status.Replicas > 0 || (dep.Spec.Replicas != nil && *dep.Spec.Replicas > 0) {
+			if err := r.freezeDeployment(ctx, dep, policy); err != nil {
+				log.Error(err, "Failed to freeze deployment on NotReady node", "name", dep.Name)
+			} else {
+				deferredAny = true
+			}
+		}
+	}
+
+	for _, sts := range affectedStatefulSets {
+		if sts.Status.Replicas > 0 || (sts.Spec.Replicas != nil && *sts.Spec.Replicas > 0) {
+			if err := r.freezeStatefulSet(ctx, sts, policy); err != nil {
+				log.Error(err, "Failed to freeze statefulset on NotReady node", "name", sts.Name)
+			} else {
+				deferredAny = true
+			}
+		}
+	}
+
+	if !deferredAny {
+		return false, nil // workloads were already frozen
+	}
+
+	// Update status to Degraded
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+		if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
+			return err
+		}
+		patchBase := latestPolicy.DeepCopy()
+		latestPolicy.Status.Phase = appsv1alpha1.PhaseDegraded
+		latestPolicy.Status.Message = fmt.Sprintf("Resume deferred: %d deployments and %d statefulsets scaled down due to NotReady nodes", len(affectedDeployments), len(affectedStatefulSets))
+
+		now := metav1.Now()
+		latestPolicy.Status.LastStartupAt = &now
+		latestPolicy.Status.LastStartupAction = "RESUME_DEFERRED_DEGRADED"
+
+		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+	})
+
+	if err != nil {
+		return false, fmt.Errorf("failed to update policy status to Degraded: %w", err)
+	}
+
+	return true, nil
 }

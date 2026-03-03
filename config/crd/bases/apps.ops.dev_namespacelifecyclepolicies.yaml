@@ -793,6 +793,7 @@ spec:
                 - Resuming
                 - Resumed
                 - Failed
+                - Degraded
                 type: string
               preConditionsStatus:
                 description: |-
