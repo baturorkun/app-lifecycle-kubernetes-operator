@@ -1367,7 +1367,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	// =========================================================================
 
 	// 1. Check for Idle/Resumed policies that need to be Degraded due to Node failures
-	if (policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed) &&
+	if (policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed || policy.Status.Phase == appsv1alpha1.PhaseResuming) &&
 		policy.Spec.NodeFailureHandling != nil && policy.Spec.NodeFailureHandling.Enabled {
 		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
 		if err != nil {
@@ -1387,34 +1387,21 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		if deferred {
-			log.Info("Namespace marked as Degraded due to NotReady nodes and workloads scaled to zero.")
-			return ctrl.Result{}, nil
+			log.Info("Namespace marked as Degraded due to NotReady nodes and workloads scaled to zero. Requeuing for active failover check.")
+			return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 		}
 	}
 
-	// 2. Auto-Resume for Degraded namespaces when nodes become Ready again
+	// 2. Auto-Resume for Degraded namespaces (Active Failover)
 	if policy.Status.Phase == appsv1alpha1.PhaseDegraded {
-		// Verify if nodes are back to a healthy state
-		nodeList := &corev1.NodeList{}
-		if err := r.List(ctx, nodeList); err != nil {
-			log.Error(err, "Failed to list nodes during Degraded Phase check")
-			return ctrl.Result{}, err
-		}
+		log.Info("Namespace is in Degraded state. Triggering active failover resume", "policy", policy.Name)
 
-		anyNotReady := false
-		for _, node := range nodeList.Items {
-			if !isNodeReady(&node) {
-				anyNotReady = true
-				break
-			}
+		// CLEANUP: Before resuming, ensure all "ghost pods" from the failed nodes are cleared.
+		// This is critical because some pods might have entered Terminating state AFTER the initial scale-down.
+		if err := r.cleanupGhostPods(ctx, policy.Spec.TargetNamespace); err != nil {
+			log.Error(err, "Failed to cleanup ghost pods during active failover")
+			// We proceed anyway as the resume might still help, but we log the error.
 		}
-
-		if anyNotReady {
-			log.V(1).Info("Nodes are still NotReady, namespace remains Degraded", "policy", policy.Name)
-			return ctrl.Result{}, nil
-		}
-
-		log.Info("Nodes are healthy again. Resuming Degraded namespace", "policy", policy.Name)
 
 		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
 		if err != nil {
@@ -1457,6 +1444,12 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 		now := metav1.Now()
+		// FINAL CLEANUP: As a last safety net, ensure no "ghost pods" survived the resume.
+		// Some pods might only enter Terminating state during the actual resume itself.
+		if err := r.cleanupGhostPods(ctx, policy.Spec.TargetNamespace); err != nil {
+			log.Error(err, "Failed to perform final ghost pod cleanup after active failover")
+		}
+
 		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
@@ -2006,6 +1999,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// We need to update this field as well, but our updateStatus helper only updates Phase, Message and OperationId.
 		// Since we need to update a custom field (LastResumeAt) securely, we should use a custom retry block here.
 
+		// FINAL CLEANUP: As a last safety net, ensure no "ghost pods" survived the resume.
+		if err := r.cleanupGhostPods(ctx, policy.Spec.TargetNamespace); err != nil {
+			log.Error(err, "Failed to perform final ghost pod cleanup after resume")
+		}
+
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
@@ -2484,14 +2482,9 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 				return false
 			},
 			CreateFunc: func(e event.CreateEvent) bool {
-				// Reconcile on create events IF there is a pending startup resume or pending freeze
-				// This ensures that after operator restart, policies already in PendingStartupResume
-				// or PendingFreeze state are enqueued for reconciliation to start the delay timer.
-				policy, ok := e.Object.(*appsv1alpha1.NamespaceLifecyclePolicy)
-				if ok && (policy.Status.PendingStartupResume || policy.Status.PendingFreeze) {
-					return true
-				}
-				return false
+				// Always reconcile on create events (including operator startup)
+				// to ensure the current state of the world matches the policy.
+				return true
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
 				// Trigger on delete
@@ -2936,6 +2929,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodesAndDeferResume(ctx contex
 	for _, node := range nodeList.Items {
 		if !isNodeReady(&node) {
 			notReadyNodes[node.Name] = true
+			log.Info("🔍 Detected NotReady node", "node", node.Name)
 		}
 	}
 
@@ -2951,11 +2945,27 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodesAndDeferResume(ctx contex
 		return false, fmt.Errorf("failed to list pods in namespace %s: %w", policy.Spec.TargetNamespace, err)
 	}
 
+	log.Info("🔍 Checking pods for affected nodes", "namespace", policy.Spec.TargetNamespace, "podCount", len(podList.Items))
+
 	affectedDeployments := make(map[string]*appsv1.Deployment)
 	affectedStatefulSets := make(map[string]*appsv1.StatefulSet)
 
-	for _, pod := range podList.Items {
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		log.V(1).Info("🔍 Checking pod location", "pod", pod.Name, "node", pod.Spec.NodeName, "onNotReadyNode", notReadyNodes[pod.Spec.NodeName])
+		// If the pod is on a failed node
 		if pod.Spec.NodeName != "" && notReadyNodes[pod.Spec.NodeName] {
+			log.Info("🔍 Pod on NotReady node detected", "pod", pod.Name, "node", pod.Spec.NodeName, "isTerminating", pod.DeletionTimestamp != nil)
+			// If the pod is already in a Terminating state, force delete it
+			// This clears "ghost pods" from dead nodes so they can be rescheduled immediately.
+			if pod.DeletionTimestamp != nil {
+				log.Info("🔥 Force deleting terminating pod on NotReady node", "pod", pod.Name, "node", pod.Spec.NodeName)
+				if err := r.Delete(ctx, pod, client.GracePeriodSeconds(0)); err != nil {
+					log.Error(err, "Failed to force delete pod", "pod", pod.Name)
+				}
+				// Even if deletion fails, we continue to check other pods/owners
+				continue
+			}
 			// Find owner
 			for _, owner := range pod.OwnerReferences {
 				if owner.Kind == "ReplicaSet" {
@@ -3041,4 +3051,45 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodesAndDeferResume(ctx contex
 	}
 
 	return true, nil
+}
+
+// cleanupGhostPods identifies and forcefully deletes pods in Terminating state on NotReady nodes in a namespace.
+func (r *NamespaceLifecyclePolicyReconciler) cleanupGhostPods(ctx context.Context, namespace string) error {
+	log := logf.FromContext(ctx)
+
+	// List all nodes to find NotReady ones
+	nodeList := &corev1.NodeList{}
+	if err := r.List(ctx, nodeList); err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	notReadyNodes := make(map[string]bool)
+	for _, node := range nodeList.Items {
+		if !isNodeReady(&node) {
+			notReadyNodes[node.Name] = true
+		}
+	}
+
+	if len(notReadyNodes) == 0 {
+		return nil
+	}
+
+	// List pods in the target namespace
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("failed to list pods in namespace %s: %w", namespace, err)
+	}
+
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Spec.NodeName != "" && notReadyNodes[pod.Spec.NodeName] {
+			if pod.DeletionTimestamp != nil {
+				log.Info("🔥 Force deleting terminating pod on NotReady node", "pod", pod.Name, "node", pod.Spec.NodeName)
+				if err := r.Delete(ctx, pod, client.GracePeriodSeconds(0)); err != nil {
+					log.Error(err, "Failed to force delete pod", "pod", pod.Name)
+				}
+			}
+		}
+	}
+	return nil
 }

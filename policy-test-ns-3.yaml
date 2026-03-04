@@ -1,0 +1,11 @@
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: policy-test-ns-3
+spec:
+  targetNamespace: test-ns-3
+  action: Resume
+  nodeFailureHandling:
+    enabled: true
+  startupPolicy: Resume
+  startupResumePriority: 3

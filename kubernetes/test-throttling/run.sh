@@ -3,11 +3,12 @@
 IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test1
 IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test2
 IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test3
-IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test4
+#IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test4
 #IMAGE=nginx REPLICAS=1 NUMBER=20 TYPE=deployment ./test-create-deployments.sh test5
 
 #NAMESPACES="test1 test2 test3 test4 test5" ./create-throttling-policies.sh
 
-NAMESPACES="test1 test2 test3 test4" ./create-throttling-policies.sh
+# only manage the first three namespaces for this run
+NAMESPACES="test1 test2 test3" ./create-throttling-policies.sh
 
 #podman restart  dev-worker dev-worker2
