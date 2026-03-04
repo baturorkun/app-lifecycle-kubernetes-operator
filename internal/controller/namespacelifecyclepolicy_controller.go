@@ -545,7 +545,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		"statefulsets", len(statefulSets.Items))
 
 	// Pre-action check for Node down logic when resuming
-	if action == appsv1alpha1.LifecycleActionResume {
+	if action == appsv1alpha1.LifecycleActionResume && policy.Spec.NodeFailureHandling != nil && policy.Spec.NodeFailureHandling.Enabled {
 		deferred, err := r.checkNodesAndDeferResume(ctx, policy, deployments, statefulSets)
 		if err != nil {
 			log.Error(err, "Failed to check node status and defer resume")
@@ -1367,7 +1367,8 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	// =========================================================================
 
 	// 1. Check for Idle/Resumed policies that need to be Degraded due to Node failures
-	if policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed {
+	if (policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed) &&
+		policy.Spec.NodeFailureHandling != nil && policy.Spec.NodeFailureHandling.Enabled {
 		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
 		if err != nil {
 			log.Error(err, "Failed to list deployments for node failure check")
@@ -2296,7 +2297,8 @@ func (r *NamespaceLifecyclePolicyReconciler) mapNodeReadyToPolicy(ctx context.Co
 
 		if !nodeReady {
 			// On node NotReady, trigger policies in Idle or Resumed phases
-			if policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed {
+			if (policy.Status.Phase == appsv1alpha1.PhaseIdle || policy.Status.Phase == appsv1alpha1.PhaseResumed) &&
+				policy.Spec.NodeFailureHandling != nil && policy.Spec.NodeFailureHandling.Enabled {
 				needsReconcile = true
 			}
 		} else {

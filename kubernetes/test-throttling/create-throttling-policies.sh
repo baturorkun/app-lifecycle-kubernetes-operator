@@ -104,6 +104,10 @@ spec:
   # Startup policy: Resume when operator starts
   startupPolicy: Resume
 
+  # Node failure handling: Enable graceful degradation
+  nodeFailureHandling:
+    enabled: true
+
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
 
@@ -198,7 +202,7 @@ echo ""
 echo "Test workflow:"
 echo "1. Create test workloads in each namespace:"
 echo "   for ns in ${NAMESPACES[*]}; do"
-echo "     IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment ./kubernetes/test-create-deployments.sh \$ns"
+echo "     IMAGE=nginx REPLICAS=1 NUMBER=10 TYPE=deployment ./kubernetes/test-throttling/test-create-deployments.sh \$ns"
 echo "   done"
 echo ""
 echo "2. Policies will automatically Freeze workloads (action: Freeze)"

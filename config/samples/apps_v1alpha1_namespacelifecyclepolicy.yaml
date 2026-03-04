@@ -103,13 +103,17 @@ spec:
   # startupNodeReadinessPolicy defines node readiness requirements before applying startup policy.
   # Only applies when startupPolicy is Resume or Freeze.
   # This helps ensure pods are distributed across all available nodes when operator starts.
-  # startupNodeReadinessPolicy:
-  #   enabled: true
-  #   timeoutSeconds: 120          # Wait max 2 minutes for nodes
-  #   requireAllNodes: true        # REQUIRED: true = all nodes, false = use minReadyNodes
-  #   minReadyNodes: 2             # Only used when requireAllNodes: false
-  #   nodeSelector:
-  #     node-role.kubernetes.io/worker: ""
+  # startupNodeReadinessPolicy: ...
+
+  # ============================================================================
+  # NODE FAILURE HANDLING
+  # ============================================================================
+
+  # nodeFailureHandling defines how the operator should behave when nodes hosting active workloads fail.
+  # When enabled, it gracefully degrades affected workloads (scale down to 0) and
+  # automatically recovers them (scale back up) when nodes are ready.
+  nodeFailureHandling:
+    enabled: true
 
   # ============================================================================
   # ADAPTIVE THROTTLING (Resume only)

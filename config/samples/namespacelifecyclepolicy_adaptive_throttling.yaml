@@ -24,6 +24,11 @@ spec:
   # This policy will be processed before policies with higher priority numbers
   startupResumePriority: 1
 
+  # NODE FAILURE HANDLING
+  # Gracefully degrade workloads on failures and auto-recover when nodes are ready
+  nodeFailureHandling:
+    enabled: true
+
   # ADAPTIVE THROTTLING CONFIGURATION
   # This enables CPU-aware, adaptive batched resume to prevent node overload
   adaptiveThrottling:

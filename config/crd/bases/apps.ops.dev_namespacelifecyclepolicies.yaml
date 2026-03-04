@@ -322,6 +322,17 @@ spec:
                 maximum: 99999
                 minimum: 0
                 type: integer
+              nodeFailureHandling:
+                description: |-
+                  nodeFailureHandling defines how the operator should behave when nodes hosting active workloads fail.
+                  When enabled, it gracefully degrades affected workloads and automatically recovers them when nodes are ready.
+                properties:
+                  enabled:
+                    description: |-
+                      enabled activates automatic scale-down of workloads on NotReady nodes
+                      and automatically recovers them once nodes become Ready again.
+                    type: boolean
+                type: object
               operationId:
                 description: |-
                   operationId is an optional identifier for this operation.

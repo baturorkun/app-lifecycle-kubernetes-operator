@@ -199,6 +199,11 @@ type NamespaceLifecyclePolicySpec struct {
 	// +kubebuilder:validation:Maximum=99999
 	FreezePriority int32 `json:"freezePriority,omitempty"`
 
+	// nodeFailureHandling defines how the operator should behave when nodes hosting active workloads fail.
+	// When enabled, it gracefully degrades affected workloads and automatically recovers them when nodes are ready.
+	// +optional
+	NodeFailureHandling *NodeFailureHandlingConfig `json:"nodeFailureHandling,omitempty"`
+
 	// adaptiveThrottling enables adaptive throttling during Resume operations
 	// to prevent node overload by monitoring node conditions and pending pods.
 	// Only applies when action is Resume.
@@ -261,6 +266,14 @@ type StartupNodeReadinessPolicy struct {
 	// Default: {"node-role.kubernetes.io/worker": ""}
 	// +optional
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+}
+
+// NodeFailureHandlingConfig defines how the operator should handle node failures
+type NodeFailureHandlingConfig struct {
+	// enabled activates automatic scale-down of workloads on NotReady nodes
+	// and automatically recovers them once nodes become Ready again.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // AdaptiveThrottlingConfig defines adaptive throttling configuration for Resume operations

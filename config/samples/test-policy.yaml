@@ -12,6 +12,8 @@ spec:
   startupPolicy: Resume
   startupResumePriority: 1  # Higher priority (processed first)
   startupResumeDelay: 0s
+  nodeFailureHandling:
+    enabled: true
   balancePods: true
   balanceWindowSeconds: 300
   terminationGracePeriodSeconds:

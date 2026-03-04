@@ -9,33 +9,15 @@ set -e
 
 if [[ -z "$1" ]]; then
     echo "Error: Namespace parameter is required"
-    echo "Usage: IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment $0 <namespace>"
+    echo "Usage: [IMAGE=nginx] [REPLICAS=1] [NUMBER=10] [TYPE=deployment] $0 <namespace>"
     exit 1
 fi
 
-if [[ -z "$IMAGE" ]]; then
-    echo "Error: IMAGE environment variable is required"
-    echo "Usage: IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment $0 <namespace>"
-    exit 1
-fi
-
-if [[ -z "$REPLICAS" ]]; then
-    echo "Error: REPLICAS environment variable is required"
-    echo "Usage: IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment $0 <namespace>"
-    exit 1
-fi
-
-if [[ -z "$NUMBER" ]]; then
-    echo "Error: NUMBER environment variable is required"
-    echo "Usage: IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment $0 <namespace>"
-    exit 1
-fi
-
-if [[ -z "$TYPE" ]]; then
-    echo "Error: TYPE environment variable is required"
-    echo "Usage: IMAGE=nginx REPLICAS=3 NUMBER=10 TYPE=deployment $0 <namespace>"
-    exit 1
-fi
+# Default values
+IMAGE="${IMAGE:-nginx}"
+REPLICAS="${REPLICAS:-1}"
+NUMBER="${NUMBER:-10}"
+TYPE="${TYPE:-deployment}"
 
 if [[ "$TYPE" != "deployment" && "$TYPE" != "statefulset" ]]; then
     echo "Error: TYPE must be 'deployment' or 'statefulset'"
