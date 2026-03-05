@@ -31,5 +31,6 @@ go.work
 
 .DS_Store
 
-# Local operator log (dev only)
-operator.log
+# Local operator log (dev only) — but keep test run logs in test/logs/
+*.log
+!test/logs/**/*.log

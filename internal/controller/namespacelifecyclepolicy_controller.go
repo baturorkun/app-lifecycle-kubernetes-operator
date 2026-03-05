@@ -2524,6 +2524,10 @@ func (r *NamespaceLifecyclePolicyReconciler) SetupWithManager(mgr ctrl.Manager) 
 							policy.Status.NodeFailureEventDetectedAt.After(policy.Status.NodeFailureEventHandledAt.Time)) {
 						return true
 					}
+					// Unhandled operationId — spec was changed before operator restarted
+					if policy.Spec.OperationId != "" && policy.Status.LastHandledOperationId != policy.Spec.OperationId {
+						return true
+					}
 				}
 				return false
 			},

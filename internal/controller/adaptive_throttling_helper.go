@@ -58,8 +58,13 @@ func (r *NamespaceLifecyclePolicyReconciler) checkManualOverride(
 
 	if isManualPending {
 		if isStartupOperation {
-			shouldAbort = true
-			reason = "Manual command takes precedence over Startup Resume"
+			// For startup: only abort if the operationId CHANGED after startup began.
+			// A pre-existing unhandled operationId is NOT a manual override —
+			// the startup resume is the correct handler for it.
+			if latestPolicy.Spec.OperationId != policy.Spec.OperationId {
+				shouldAbort = true
+				reason = "Manual command takes precedence over Startup Resume"
+			}
 		} else if latestPolicy.Spec.OperationId != policy.Spec.OperationId {
 			shouldAbort = true
 			reason = "Newer manual command detected"
