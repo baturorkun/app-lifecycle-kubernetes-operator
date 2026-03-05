@@ -11,7 +11,6 @@ rules:
   - nodes
   - pods
   verbs:
-  - delete
   - get
   - list
   - watch

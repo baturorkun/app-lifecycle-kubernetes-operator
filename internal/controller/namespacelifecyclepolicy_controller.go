@@ -1155,12 +1155,22 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				if priority == 0 {
 					priority = 100
 				}
-				log.Info("🚀🚀🚀 ========== STARTUP RESUME OPERATION STARTING (AFTER DELAY) ========== 🚀🚀🚀",
-					"policy", policy.Name,
-					"targetNamespace", policy.Spec.TargetNamespace,
-					"startupResumePriority", priority,
-					"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
-					"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
+				if policy.Status.FailedNodeName != "" {
+					log.Info("🔄🔄🔄 ========== NODE FAILURE RECOVERY RESUME STARTING ========== 🔄🔄🔄",
+						"policy", policy.Name,
+						"targetNamespace", policy.Spec.TargetNamespace,
+						"failedNode", policy.Status.FailedNodeName,
+						"startupResumePriority", priority,
+						"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
+						"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
+				} else {
+					log.Info("🚀🚀🚀 ========== STARTUP RESUME OPERATION STARTING (AFTER DELAY) ========== 🚀🚀🚀",
+						"policy", policy.Name,
+						"targetNamespace", policy.Spec.TargetNamespace,
+						"startupResumePriority", priority,
+						"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
+						"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
+				}
 
 				// Check pre-conditions before resuming (for delayed startup resume)
 				if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {

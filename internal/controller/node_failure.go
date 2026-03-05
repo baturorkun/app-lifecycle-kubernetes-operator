@@ -309,6 +309,78 @@ func setDegradedCondition(conditions *[]metav1.Condition, failedNode string, aff
 	*conditions = append(*conditions, newCond)
 }
 
+// HandleNodeFailureAtStartup is called from the startup goroutine when a NotReady node is detected
+// before the startup resume phase. It synchronously scales down all fully-local workloads for the
+// given policy and updates the policy status so that PHASE 2 of startup can resume surviving
+// workloads on healthy nodes.
+func (r *NamespaceLifecyclePolicyReconciler) HandleNodeFailureAtStartup(
+	ctx context.Context,
+	policy *appsv1alpha1.NamespaceLifecyclePolicy,
+	failedNode string,
+) error {
+	log := logf.FromContext(ctx)
+
+	// Ensure FailedNodeName is set before calling handleNodeFailureEvent (it reads from status)
+	policy.Status.FailedNodeName = failedNode
+	now := metav1.Now()
+	policy.Status.NodeFailureEventDetectedAt = &now
+
+	log.Info("🔴 Startup pre-scan: scaling down fully-local workloads before resume",
+		"policy", policy.Name,
+		"failedNode", failedNode)
+
+	affectedWorkloads, err := r.handleNodeFailureEvent(ctx, policy)
+	if err != nil {
+		log.Error(err, "Startup pre-scan: failed to handle node failure", "policy", policy.Name)
+		return err
+	}
+
+	// Fetch latest to avoid conflict on status update
+	latest := policy.DeepCopy()
+	if fetchErr := r.Get(ctx, client.ObjectKeyFromObject(policy), latest); fetchErr != nil {
+		log.Error(fetchErr, "Startup pre-scan: failed to re-fetch policy for status update", "policy", policy.Name)
+		return fetchErr
+	}
+
+	handledAt := metav1.Now()
+	latest.Status.FailedNodeName = failedNode
+	latest.Status.NodeFailureEventDetectedAt = &now
+	latest.Status.NodeFailureEventHandledAt = &handledAt
+	latest.Status.AffectedWorkloads = affectedWorkloads
+	// PendingStartupResume is intentionally left false here — startup PHASE 2 will
+	// run the resume directly via processPolicyWithDelayAndResume.
+	setDegradedCondition(&latest.Status.Conditions, failedNode, affectedWorkloads)
+
+	if len(affectedWorkloads) > 0 {
+		log.Info("🔴 Startup pre-scan: namespace DEGRADED due to node failure",
+			"policy", policy.Name,
+			"failedNode", failedNode,
+			"affectedWorkloads", affectedWorkloads)
+	} else {
+		log.Info("✅ Startup pre-scan: no fully-local workloads found — node failure handled",
+			"policy", policy.Name,
+			"failedNode", failedNode)
+	}
+
+	// Set PendingStartupResume=true so the reconcile loop re-resumes workloads
+	// on the surviving nodes once scale-down is complete.
+	latest.Status.PendingStartupResume = true
+	latest.Status.StartupResumeDelayStartedAt = &handledAt
+
+	if updateErr := r.Status().Update(ctx, latest); updateErr != nil {
+		log.Error(updateErr, "Startup pre-scan: failed to update policy status after node failure", "policy", policy.Name)
+		return updateErr
+	}
+
+	log.Info("🔄 Startup pre-scan: node failure handled — reconcile loop will resume on surviving nodes",
+		"policy", policy.Name,
+		"failedNode", failedNode)
+
+	// Propagate the updated status back to the caller's copy
+	policy.Status = latest.Status
+	return nil
+}
+
 // clearDegradedCondition removes the "Degraded" condition from the policy's Conditions slice.
 func clearDegradedCondition(conditions *[]metav1.Condition) {
 	filtered := (*conditions)[:0]

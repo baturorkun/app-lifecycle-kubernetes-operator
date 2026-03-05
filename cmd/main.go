@@ -378,10 +378,10 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		"ignore", len(ignorePolicies))
 
 	// ============================================================================
-	// PHASE 1: Process FREEZE policies by priority (0, 1, 2, ...)
+	// STARTUP FREEZE: Process FREEZE policies by priority (0, 1, 2, ...)
 	// ============================================================================
 	if len(freezePolicies) > 0 {
-		setupLog.Info("🥶 ========== PHASE 1: PROCESSING FREEZE POLICIES ==========")
+		setupLog.Info("🥶 ========== STARTUP FREEZE: PROCESSING FREEZE POLICIES ==========")
 
 		// Sort freeze policies by freezePriority (lower number = freeze first: 0, then 1, then 2...)
 		sort.Slice(freezePolicies, func(i, j int) bool {
@@ -445,8 +445,10 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	// ============================================================================
 	// NODE FAILURE PRE-SCAN
 	// Detect NotReady nodes BEFORE processing resume policies.
-	// Policies with handleNodeFailure=true are removed from the resume list and
-	// instead have their node failure status set so the reconcile loop handles them.
+	// Policies with handleNodeFailure=true are scaled down SYNCHRONOUSLY here, before
+	// STARTUP RESUME processes any workloads.  The scale-down removes fully-local workloads from
+	// the failed node so that STARTUP RESUME only resumes workloads destined for healthy nodes.
+	// After scale-down the reconcile loop re-resumes via PendingStartupResume=true.
 	// ============================================================================
 	nodeList := &corev1.NodeList{}
 	if err := k8sClient.List(ctx, nodeList); err != nil {
@@ -465,10 +467,9 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		}
 
 		if len(failedNodeNames) > 0 {
-			setupLog.Info("🔴 Startup: NotReady nodes detected — suppressing startupPolicy:Resume for handleNodeFailure policies",
+			setupLog.Info("🔴 Startup: NotReady nodes detected — scaling down affected workloads BEFORE startup resume",
 				"failedNodes", failedNodeNames)
 
-			now := metav1.Now()
 			failedNode := failedNodeNames[0] // use the first failed node; real-time watcher handles subsequent ones
 
 			var filteredResumePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
@@ -478,25 +479,28 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 					continue
 				}
 
-				setupLog.Info("🔴 Startup: suppressing startupPolicy:Resume — node failure active",
+				setupLog.Info("🔴 Startup pre-scan: performing synchronous scale-down before resume",
 					"policy", policy.Name,
 					"failedNode", failedNode)
 
-				// Idempotency: only update if not already tracking this exact failure
-				alreadyTracked := policy.Status.FailedNodeName == failedNode &&
-					policy.Status.NodeFailureEventDetectedAt != nil &&
-					(policy.Status.NodeFailureEventHandledAt == nil ||
-						policy.Status.NodeFailureEventDetectedAt.After(policy.Status.NodeFailureEventHandledAt.Time))
+				// Idempotency: only run if not already handled for this exact failure
+				alreadyHandled := policy.Status.FailedNodeName == failedNode &&
+					policy.Status.NodeFailureEventHandledAt != nil &&
+					(policy.Status.NodeFailureEventDetectedAt == nil ||
+						policy.Status.NodeFailureEventHandledAt.After(policy.Status.NodeFailureEventDetectedAt.Time))
 
-				if !alreadyTracked {
-					policy.Status.FailedNodeName = failedNode
-					policy.Status.NodeFailureEventDetectedAt = &now
-					if err := k8sClient.Status().Update(ctx, policy); err != nil {
-						setupLog.Error(err, "Startup: failed to patch node failure status", "policy", policy.Name)
-						// Still suppress resume even on patch failure — safer than resuming into a degraded cluster
+				if !alreadyHandled {
+					if err := reconciler.HandleNodeFailureAtStartup(ctx, policy, failedNode); err != nil {
+						setupLog.Error(err, "Startup pre-scan: failed to handle node failure for policy", "policy", policy.Name)
+						// Still suppress resume on failure — safer than resuming into a degraded cluster
 					}
+				} else {
+					setupLog.Info("✅ Startup pre-scan: node failure already handled for this failure event — skipping scale-down",
+						"policy", policy.Name,
+						"failedNode", failedNode)
 				}
-				// Do NOT add to filteredResumePolicies — startup resume is suppressed
+				// Do NOT add to filteredResumePolicies — startup resume is suppressed here;
+				// the reconcile loop will re-resume via PendingStartupResume=true.
 			}
 			resumePolicies = filteredResumePolicies
 		} else {
@@ -505,10 +509,10 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	}
 
 	// ============================================================================
-	// PHASE 2: Process RESUME policies by priority (lower number = higher priority)
+	// STARTUP RESUME: Process RESUME policies by priority (lower number = higher priority)
 	// ============================================================================
 	if len(resumePolicies) > 0 {
-		setupLog.Info("🚀 ========== PHASE 2: PROCESSING RESUME POLICIES ==========")
+		setupLog.Info("🚀 ========== STARTUP RESUME: PROCESSING RESUME POLICIES ==========")
 
 		// Sort resume policies by startupResumePriority (lower number = higher priority)
 		sort.Slice(resumePolicies, func(i, j int) bool {
