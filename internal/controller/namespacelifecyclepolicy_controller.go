@@ -1390,9 +1390,15 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				}
 
 				log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
-				// If a node failure is still active, keep requeueing so force-delete of
-				// Terminating pods runs once Kubernetes marks them (happens ~5min after NotReady).
+				// If a node failure is still active, immediately force-delete any pods that are
+				// already Terminating on the failed node (Kubernetes only sets DeletionTimestamp
+				// ~5min after NotReady, so some pods may already be stuck by now).
+				// Then keep requeueing every 30s to catch any newly-terminating pods.
 				if policy.Spec.HandleNodeFailure && policy.Status.FailedNodeName != "" {
+					log.Info("🗑️ Force-deleting terminating pods after recovery resume",
+						"policy", policy.Name,
+						"failedNode", policy.Status.FailedNodeName)
+					r.forceDeleteTerminatingPods(ctx, &policy, policy.Status.FailedNodeName)
 					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 				}
 				return ctrl.Result{}, nil
