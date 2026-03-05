@@ -207,6 +207,15 @@ type NamespaceLifecyclePolicySpec struct {
 	// Checks app readiness and health endpoints before resuming the namespace.
 	// +optional
 	PreConditions *PreConditionsConfig `json:"preConditions,omitempty"`
+
+	// handleNodeFailure enables automatic detection and response to node failures.
+	// When a node transitions to NotReady, the operator will find all Deployments and
+	// StatefulSets in the targetNamespace whose ALL pods were running on that node,
+	// scale them down to 0 replicas, and set a Degraded condition on this CR.
+	// Only workloads with every pod on the failed node are scaled down.
+	// Workloads spread across multiple nodes are not affected.
+	// +optional
+	HandleNodeFailure bool `json:"handleNodeFailure,omitempty"`
 }
 
 // TerminationGracePeriodConfig defines terminationGracePeriodSeconds for different resource types.
@@ -622,6 +631,25 @@ type NamespaceLifecyclePolicyStatus struct {
 	// NodeReadyEventHandledAt is the time when the last detected node ready event was processed
 	// +optional
 	NodeReadyEventHandledAt *metav1.Time `json:"nodeReadyEventHandledAt,omitempty"`
+
+	// nodeFailureEventDetectedAt is the time when a node NotReady event was detected
+	// that triggered the node failure handler. Set by the node watcher or startup scan.
+	// +optional
+	NodeFailureEventDetectedAt *metav1.Time `json:"nodeFailureEventDetectedAt,omitempty"`
+
+	// nodeFailureEventHandledAt is the time when the last node failure event was fully processed
+	// (i.e., affected workloads were scaled to 0 and status was updated).
+	// +optional
+	NodeFailureEventHandledAt *metav1.Time `json:"nodeFailureEventHandledAt,omitempty"`
+
+	// failedNodeName is the name of the node that triggered the last node failure event.
+	// +optional
+	FailedNodeName string `json:"failedNodeName,omitempty"`
+
+	// affectedWorkloads lists the names of Deployments and StatefulSets that were scaled
+	// to 0 as a result of the last node failure event.
+	// +optional
+	AffectedWorkloads []string `json:"affectedWorkloads,omitempty"`
 
 	// pendingStartupResume indicates whether a startup resume operation is pending with a delay
 	// When true, the operator will wait for the delay period before resuming the namespace

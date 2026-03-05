@@ -32,6 +32,7 @@ import (
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -439,6 +440,68 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		}
 
 		setupLog.Info("✅ ========== FREEZE POLICIES COMPLETED ==========")
+	}
+
+	// ============================================================================
+	// NODE FAILURE PRE-SCAN
+	// Detect NotReady nodes BEFORE processing resume policies.
+	// Policies with handleNodeFailure=true are removed from the resume list and
+	// instead have their node failure status set so the reconcile loop handles them.
+	// ============================================================================
+	nodeList := &corev1.NodeList{}
+	if err := k8sClient.List(ctx, nodeList); err != nil {
+		setupLog.Error(err, "Startup: failed to list nodes for node failure pre-scan — skipping")
+	} else {
+		var failedNodeNames []string
+		for i := range nodeList.Items {
+			node := &nodeList.Items[i]
+			// Check NodeReady condition
+			for _, cond := range node.Status.Conditions {
+				if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+					failedNodeNames = append(failedNodeNames, node.Name)
+					break
+				}
+			}
+		}
+
+		if len(failedNodeNames) > 0 {
+			setupLog.Info("🔴 Startup: NotReady nodes detected — suppressing startupPolicy:Resume for handleNodeFailure policies",
+				"failedNodes", failedNodeNames)
+
+			now := metav1.Now()
+			failedNode := failedNodeNames[0] // use the first failed node; real-time watcher handles subsequent ones
+
+			var filteredResumePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
+			for _, policy := range resumePolicies {
+				if !policy.Spec.HandleNodeFailure {
+					filteredResumePolicies = append(filteredResumePolicies, policy)
+					continue
+				}
+
+				setupLog.Info("🔴 Startup: suppressing startupPolicy:Resume — node failure active",
+					"policy", policy.Name,
+					"failedNode", failedNode)
+
+				// Idempotency: only update if not already tracking this exact failure
+				alreadyTracked := policy.Status.FailedNodeName == failedNode &&
+					policy.Status.NodeFailureEventDetectedAt != nil &&
+					(policy.Status.NodeFailureEventHandledAt == nil ||
+						policy.Status.NodeFailureEventDetectedAt.After(policy.Status.NodeFailureEventHandledAt.Time))
+
+				if !alreadyTracked {
+					policy.Status.FailedNodeName = failedNode
+					policy.Status.NodeFailureEventDetectedAt = &now
+					if err := k8sClient.Status().Update(ctx, policy); err != nil {
+						setupLog.Error(err, "Startup: failed to patch node failure status", "policy", policy.Name)
+						// Still suppress resume even on patch failure — safer than resuming into a degraded cluster
+					}
+				}
+				// Do NOT add to filteredResumePolicies — startup resume is suppressed
+			}
+			resumePolicies = filteredResumePolicies
+		} else {
+			setupLog.Info("✅ Startup: all nodes are Ready — node failure pre-scan passed")
+		}
 	}
 
 	// ============================================================================

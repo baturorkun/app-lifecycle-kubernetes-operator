@@ -103,7 +103,8 @@ spec:
 
   # Startup policy: Resume when operator starts
   startupPolicy: Resume
-
+  handleNodeFailure: true
+  
   # Operation ID for idempotency and tracking
   operationId: "$OPERATION_ID"
 

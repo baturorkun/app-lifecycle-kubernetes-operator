@@ -30,3 +30,6 @@ go.work
 *.kubeconfig
 
 .DS_Store
+
+# Local operator log (dev only)
+operator.log

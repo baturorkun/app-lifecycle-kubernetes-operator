@@ -1,0 +1,28 @@
+apiVersion: apps.ops.dev/v1alpha1
+kind: NamespaceLifecyclePolicy
+metadata:
+  name: policy-node-failure-demo
+  namespace: default
+spec:
+  # Target namespace to protect
+  targetNamespace: test1
+
+  # Keep workloads frozen; startupPolicy:Resume brings them back on healthy restart
+  action: Freeze
+
+  # Resume workloads on operator restart — but ONLY when all nodes are healthy.
+  # If a node is NotReady at startup, this resume is suppressed and the node
+  # failure handler runs instead.
+  startupPolicy: Resume
+
+  # Enable node failure detection.
+  # When a node transitions to NotReady, the operator will:
+  #   1. Find all Deployments and StatefulSets in targetNamespace whose ALL pods
+  #      are scheduled on the failed node.
+  #   2. Scale those workloads down to 0 (saving replica count in annotation).
+  #   3. Set a Degraded condition on this CR with the list of affected workloads.
+  # Workloads spread across multiple nodes are NOT touched.
+  handleNodeFailure: true
+
+  # Operation ID for idempotency
+  operationId: "node-failure-demo-v1"

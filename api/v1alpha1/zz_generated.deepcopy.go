@@ -261,6 +261,19 @@ func (in *NamespaceLifecyclePolicyStatus) DeepCopyInto(out *NamespaceLifecyclePo
 		in, out := &in.NodeReadyEventHandledAt, &out.NodeReadyEventHandledAt
 		*out = (*in).DeepCopy()
 	}
+	if in.NodeFailureEventDetectedAt != nil {
+		in, out := &in.NodeFailureEventDetectedAt, &out.NodeFailureEventDetectedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.NodeFailureEventHandledAt != nil {
+		in, out := &in.NodeFailureEventHandledAt, &out.NodeFailureEventHandledAt
+		*out = (*in).DeepCopy()
+	}
+	if in.AffectedWorkloads != nil {
+		in, out := &in.AffectedWorkloads, &out.AffectedWorkloads
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.StartupResumeDelayStartedAt != nil {
 		in, out := &in.StartupResumeDelayStartedAt, &out.StartupResumeDelayStartedAt
 		*out = (*in).DeepCopy()

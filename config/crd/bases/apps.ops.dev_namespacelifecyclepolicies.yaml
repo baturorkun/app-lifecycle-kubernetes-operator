@@ -322,6 +322,15 @@ spec:
                 maximum: 99999
                 minimum: 0
                 type: integer
+              handleNodeFailure:
+                description: |-
+                  handleNodeFailure enables automatic detection and response to node failures.
+                  When a node transitions to NotReady, the operator will find all Deployments and
+                  StatefulSets in the targetNamespace whose ALL pods were running on that node,
+                  scale them down to 0 replicas, and set a Degraded condition on this CR.
+                  Only workloads with every pod on the failed node are scaled down.
+                  Workloads spread across multiple nodes are not affected.
+                type: boolean
               operationId:
                 description: |-
                   operationId is an optional identifier for this operation.
@@ -648,6 +657,13 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              affectedWorkloads:
+                description: |-
+                  affectedWorkloads lists the names of Deployments and StatefulSets that were scaled
+                  to 0 as a result of the last node failure event.
+                items:
+                  type: string
+                type: array
               conditions:
                 description: |-
                   conditions represent the current state of the NamespaceLifecyclePolicy resource.
@@ -717,6 +733,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failedNodeName:
+                description: failedNodeName is the name of the node that triggered
+                  the last node failure event.
+                type: string
               freezeDelayStartedAt:
                 description: |-
                   freezeDelayStartedAt stores the timestamp when the freeze delay began
@@ -761,6 +781,18 @@ spec:
                 description: |-
                   message provides a human-readable message about the current status.
                   This field typically contains details about the current operation or any errors encountered.
+                type: string
+              nodeFailureEventDetectedAt:
+                description: |-
+                  nodeFailureEventDetectedAt is the time when a node NotReady event was detected
+                  that triggered the node failure handler. Set by the node watcher or startup scan.
+                format: date-time
+                type: string
+              nodeFailureEventHandledAt:
+                description: |-
+                  nodeFailureEventHandledAt is the time when the last node failure event was fully processed
+                  (i.e., affected workloads were scaled to 0 and status was updated).
+                format: date-time
                 type: string
               nodeReadyEventDetectedAt:
                 description: NodeReadyEventDetectedAt is the time when a node ready
