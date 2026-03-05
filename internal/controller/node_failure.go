@@ -187,6 +187,45 @@ func (r *NamespaceLifecyclePolicyReconciler) resolveWorkloadOwnerUID(
 	return "", "", nil
 }
 
+// forceDeleteTerminatingPods force-deletes (grace period 0) all pods in the policy's
+// targetNamespace that are stuck in Terminating state on the given failedNode. This cleans
+// up ghost pods that will never be acknowledged by the dead kubelet.
+func (r *NamespaceLifecyclePolicyReconciler) forceDeleteTerminatingPods(
+	ctx context.Context,
+	policy *appsv1alpha1.NamespaceLifecyclePolicy,
+	failedNode string,
+) {
+	log := logf.FromContext(ctx)
+
+	podList := &corev1.PodList{}
+	if err := r.List(ctx, podList, client.InNamespace(policy.Spec.TargetNamespace)); err != nil {
+		log.Error(err, "Failed to list pods for force-delete", "namespace", policy.Spec.TargetNamespace)
+		return
+	}
+
+	deleted := 0
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Spec.NodeName != failedNode || pod.DeletionTimestamp == nil {
+			continue
+		}
+		gracePeriod := int64(0)
+		if err := r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: &gracePeriod}); err != nil {
+			log.Error(err, "Failed to force-delete terminating pod",
+				"pod", pod.Name, "namespace", pod.Namespace, "node", failedNode)
+			continue
+		}
+		log.Info("🗑️ Force-deleted terminating pod on failed node",
+			"policy", policy.Name, "pod", pod.Name, "namespace", pod.Namespace, "node", failedNode)
+		deleted++
+	}
+
+	if deleted > 0 {
+		log.Info("🗑️ Force-deleted terminating pods on failed node",
+			"policy", policy.Name, "count", deleted, "node", failedNode)
+	}
+}
+
 // handleNodeFailureEvent scales down all Deployments and StatefulSets in the policy's
 // targetNamespace whose ALL pods are on the failed node. Returns the list of workload
 // names that were scaled to 0.
@@ -196,7 +235,11 @@ func (r *NamespaceLifecyclePolicyReconciler) handleNodeFailureEvent(
 ) ([]string, error) {
 	log := logf.FromContext(ctx)
 
-	// If the namespace is already fully frozen, workloads are already at 0 — nothing to do
+	// Always force-delete terminating pods on the failed node first — they are guaranteed
+	// dead and the kubelet will never acknowledge their deletion.
+	r.forceDeleteTerminatingPods(ctx, policy, policy.Status.FailedNodeName)
+
+	// If the namespace is already fully frozen, workloads are already at 0 — nothing else to do
 	if policy.Status.Phase == appsv1alpha1.PhaseFrozen {
 		log.Info("🧊 Node failure detected but namespace is already Frozen — skipping scale-down",
 			"policy", policy.Name,

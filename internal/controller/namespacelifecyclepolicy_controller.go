@@ -1380,6 +1380,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				}
 
 				log.Info("✅ Delayed startup resume completed successfully", "policy", policy.Name)
+				// If a node failure is still active, keep requeueing so force-delete of
+				// Terminating pods runs once Kubernetes marks them (happens ~5min after NotReady).
+				if policy.Spec.HandleNodeFailure && policy.Status.FailedNodeName != "" {
+					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				}
 				return ctrl.Result{}, nil
 			}
 		} // end else: no node failure active, proceed with normal startup resume logic
@@ -1439,6 +1444,14 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		log.Info("🔄 Node failure handled — requeuing to resume workloads on surviving nodes",
 			"policy", policy.Name)
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// While a node failure is active, keep force-deleting any pods that have since
+	// become Terminating (Kubernetes only sets DeletionTimestamp ~5m after NotReady).
+	// Requeue so we keep cleaning up until the node recovers.
+	if policy.Spec.HandleNodeFailure && policy.Status.FailedNodeName != "" {
+		r.forceDeleteTerminatingPods(ctx, &policy, policy.Status.FailedNodeName)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Check if this operation was already handled
