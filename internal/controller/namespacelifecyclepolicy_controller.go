@@ -64,7 +64,7 @@ const (
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=core,resources=nodes/proxy,verbs=get
 
 // shouldSkipOperation checks if the operation should be skipped based on operationId
@@ -1462,12 +1462,51 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// While a node failure is active, keep force-deleting any pods that have since
-	// become Terminating (Kubernetes only sets DeletionTimestamp ~5m after NotReady).
-	// Requeue so we keep cleaning up until the node recovers.
+	// While a node failure is active AND the node is still NotReady, keep force-deleting
+	// any pods that have since become Terminating.
+	// Stop blocking (and allow manual operations like Freeze) once:
+	//   (a) a new unhandled operationId arrives, OR
+	//   (b) the failed node has recovered (no longer NotReady)
 	if policy.Spec.HandleNodeFailure && policy.Status.FailedNodeName != "" {
-		r.forceDeleteTerminatingPods(ctx, &policy, policy.Status.FailedNodeName)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		// Let manual operations (new operationId) override the cleanup loop
+		hasNewManualOp := !r.shouldSkipOperation(&policy)
+		if hasNewManualOp {
+			// Fall through — new manual command takes precedence over cleanup loop
+		} else {
+			// Check if the node is still NotReady before continuing to loop
+			nodeStillFailed := false
+			nodeList := &corev1.NodeList{}
+			if err := r.List(ctx, nodeList); err == nil {
+				for i := range nodeList.Items {
+					if nodeList.Items[i].Name == policy.Status.FailedNodeName {
+						for _, cond := range nodeList.Items[i].Status.Conditions {
+							if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+								nodeStillFailed = true
+							}
+						}
+					}
+				}
+			}
+			if nodeStillFailed {
+				r.forceDeleteTerminatingPods(ctx, &policy, policy.Status.FailedNodeName)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			// Node recovered — clear failedNodeName so we stop looping
+			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latest := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+					return err
+				}
+				patchBase := latest.DeepCopy()
+				latest.Status.FailedNodeName = ""
+				return r.Status().Patch(ctx, latest, client.MergeFrom(patchBase))
+			}); err != nil {
+				log.Error(err, "Failed to clear FailedNodeName after node recovery")
+			}
+			if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
 	// Check if this operation was already handled

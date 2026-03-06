@@ -66,11 +66,10 @@ echo "Creating policies..."
 # Fixed delay for all policies (in seconds) - same for all policies
 DELAY=0
 PRIORITY=1
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 for NS in "${NAMESPACES[@]}"; do
     POLICY_NAME="policy-$NS"
-    OPERATION_ID="freeze-${TIMESTAMP}-${NS}"
+    OPERATION_ID="freeze-$(date +%Y%m%d-%H%M%S)-${NS}"
 
     echo ""
     echo "[$PRIORITY/$NAMESPACE_COUNT] Creating policy: $POLICY_NAME"
