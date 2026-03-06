@@ -2408,6 +2408,11 @@ func (r *NamespaceLifecyclePolicyReconciler) performBalancing(ctx context.Contex
 		}
 	}
 
+	log.Info("✅ Pod balancing completed — rolling restarts triggered",
+		"policy", policy.Name,
+		"deployments", len(deployments.Items),
+		"statefulsets", len(statefulSets.Items))
+
 	return nil
 }
 
