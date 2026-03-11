@@ -990,9 +990,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 		} else {
 			// 1. Check for manual operation override during startup delay
-			// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId)
-			// Stale actions (already handled) should not block startup resume.
-			isManualPending := policy.Spec.OperationId != "" && !r.shouldSkipOperation(&policy)
+			// Only abort if there's a genuinely NEW manual operation (operationId not yet handled).
+			// Use direct comparison instead of shouldSkipOperation, because the Checking bypass
+			// in shouldSkipOperation would make stale Freeze operations look "new".
+			isManualPending := policy.Spec.OperationId != "" &&
+				policy.Status.LastHandledOperationId != policy.Spec.OperationId
 
 			if isManualPending {
 				log.Info("⚠️ Cancelling startup resume due to pending manual operation",
@@ -1009,6 +1011,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 					patchBase := latestPolicy.DeepCopy()
 					latestPolicy.Status.PendingStartupResume = false
 					latestPolicy.Status.LastStartupAction = "CANCELLED_BY_MANUAL_OVERRIDE"
+					// Also clear any active pre-conditions check — without PendingStartupResume,
+					// the background check loop would complete but never trigger a resume.
+					if latestPolicy.Status.PreConditionsStatus != nil {
+						latestPolicy.Status.PreConditionsStatus.Checking = false
+					}
 					return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 				}); err != nil {
 					log.Error(err, "Failed to cancel pending startup resume")
