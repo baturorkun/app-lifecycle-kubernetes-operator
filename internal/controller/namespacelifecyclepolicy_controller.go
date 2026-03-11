@@ -1056,8 +1056,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 					"policy", policy.Name,
 					"targetNamespace", policy.Spec.TargetNamespace)
 
-				// Non-blocking pre-conditions check
-				if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
+				// Check pre-conditions before resuming (for delayed startup resume)
+				// SKIP pre-conditions during node failure recovery: the pre-condition service
+				// may itself be on the failed node, which would cause a deadlock.
+				// The resume will bring services back up naturally.
+				if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled && policy.Status.FailedNodeName == "" {
 					if policy.Status.PreConditionsStatus == nil || !policy.Status.PreConditionsStatus.Passed {
 						log.Info("⏳ Startup resume waiting for pre-conditions to pass (background)",
 							"policy", policy.Name,
