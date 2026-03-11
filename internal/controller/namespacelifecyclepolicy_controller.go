@@ -820,7 +820,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if policy.Status.PendingFreeze {
 		// Check for manual operation override during freeze delay
 		// Only abort if there's a NEW/PENDING manual operation
-		isManualPending := !r.shouldSkipOperation(&policy)
+		isManualPending := policy.Spec.OperationId != "" && !r.shouldSkipOperation(&policy)
 
 		if isManualPending {
 			log.Info("⚠️ Cancelling pending freeze due to pending manual operation",
@@ -992,7 +992,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			// 1. Check for manual operation override during startup delay
 			// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId)
 			// Stale actions (already handled) should not block startup resume.
-			isManualPending := !r.shouldSkipOperation(&policy)
+			isManualPending := policy.Spec.OperationId != "" && !r.shouldSkipOperation(&policy)
 
 			if isManualPending {
 				log.Info("⚠️ Cancelling startup resume due to pending manual operation",
@@ -1264,7 +1264,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	//   (b) the failed node has recovered (no longer NotReady)
 	if policy.Spec.HandleNodeFailure && policy.Status.FailedNodeName != "" {
 		// Let manual operations (new operationId) override the cleanup loop
-		hasNewManualOp := !r.shouldSkipOperation(&policy)
+		hasNewManualOp := policy.Spec.OperationId != "" && !r.shouldSkipOperation(&policy)
 		if hasNewManualOp {
 			// Fall through — new manual command takes precedence over cleanup loop
 		} else {
