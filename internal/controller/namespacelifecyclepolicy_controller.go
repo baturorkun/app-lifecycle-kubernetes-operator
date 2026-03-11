@@ -361,7 +361,7 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Conte
 }
 
 // updateStatus updates the policy status with phase, message and lastHandledOperationId
-func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string, isStartupOperation bool) error {
+func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, phase appsv1alpha1.Phase, message string) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Fetch latest version
 		latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
@@ -375,10 +375,9 @@ func (r *NamespaceLifecyclePolicyReconciler) updateStatus(ctx context.Context, p
 		latestPolicy.Status.Phase = phase
 		latestPolicy.Status.Message = message
 
-		// Only update LastHandledOperationId for user-initiated operations
-		if !isStartupOperation {
-			latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
-		}
+		// Always update LastHandledOperationId for manual operations
+		// Startup operations should not call this helper with the user's operationId
+		latestPolicy.Status.LastHandledOperationId = policy.Spec.OperationId
 
 		// Use Patch for status to be resilient to concurrent updates
 		return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
@@ -620,119 +619,42 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
 			"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
 
-		// Check pre-conditions before resuming (for startup resume)
+		// NON-BLOCKING Pre-conditions handle:
+		// If pre-conditions are enabled, we trigger a background check instead of blocking.
 		if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
-			// Check if pre-conditions should block the priority chain
-			// Default to true if not specified (nil)
-			blockPriorityChain := true
-			if policy.Spec.PreConditions.BlockPriorityChain != nil {
-				blockPriorityChain = *policy.Spec.PreConditions.BlockPriorityChain
+			log.Info("Startup policy: pre-conditions enabled - triggering background check", "policy", policy.Name)
+
+			policy.Status.Phase = appsv1alpha1.PhaseResuming
+			policy.Status.Message = "Startup: waiting for pre-conditions (background)"
+			if policy.Status.PreConditionsStatus == nil {
+				policy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{}
 			}
+			policy.Status.PreConditionsStatus.Checking = true
+			policy.Status.PendingStartupResume = true // Ensure it stays in the startup flow
+			policy.Status.StartupResumeDelayStartedAt = &now
+			policy.Status.LastStartupAction = "STARTUP_PENDING_PRECONDITIONS"
+			policy.Status.LastStartupAt = &now
 
-			log.Info("Checking pre-conditions before startup resume",
-				"appReadinessChecks", len(policy.Spec.PreConditions.AppReadinessChecks),
-				"healthEndpointChecks", len(policy.Spec.PreConditions.HealthEndpointChecks),
-				"blockPriorityChain", blockPriorityChain)
-
-			if blockPriorityChain {
-				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, policy, true); err != nil {
-					// Check if cancelled due to Freeze action
-					if strings.Contains(err.Error(), "cancelled") {
-						log.Info("Pre-conditions cancelled - action changed, returning to let reconcile handle new action")
-						return nil // Return nil to let the next reconcile handle the new action
-					}
-					// Pre-conditions failed - set phase to Failed
-					if strings.Contains(err.Error(), "timeout") {
-						log.Error(err, "Pre-conditions timeout reached during startup resume")
-						policy.Status.Phase = appsv1alpha1.PhaseFailed
-						policy.Status.Message = fmt.Sprintf("Startup resume failed: pre-conditions timeout: %v", err)
-						policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_TIMEOUT"
-					} else {
-						log.Error(err, "Failed to check pre-conditions during startup resume")
-						policy.Status.Phase = appsv1alpha1.PhaseFailed
-						policy.Status.Message = fmt.Sprintf("Startup resume failed: pre-conditions check failed: %v", err)
-						policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_ERROR"
-					}
+			// Return here - the update at the end of ApplyStartupPolicy will save this status,
+			// and the Reconcile loop will pick up the background check.
+			return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
 					return err
 				}
-
-				log.Info("All pre-conditions passed, proceeding with startup resume")
-			} else {
-				// Non-blocking mode: check pre-conditions once, if passed proceed, otherwise return and let reconcile loop handle it
-				log.Info("Pre-conditions enabled in non-blocking mode - checking once",
-					"policy", policy.Name)
-
-				allPassed, message, checkErr := r.checkPreConditions(ctx, policy)
-				if checkErr != nil {
-					log.Error(checkErr, "Failed to check pre-conditions during startup (non-blocking mode)")
-					// Update status with retry to handle conflicts
-					if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-						latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-						if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-							return getErr
-						}
-						now := metav1.Now()
-						latestPolicy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{
-							Checking:      true,
-							LastCheckedAt: &now,
-							Passed:        false,
-							Message:       fmt.Sprintf("Error checking pre-conditions: %v", checkErr),
-						}
-						latestPolicy.Status.Phase = appsv1alpha1.PhaseResuming
-						latestPolicy.Status.Message = "Waiting for pre-conditions (non-blocking mode)"
-						latestPolicy.Status.PendingStartupResume = true
-						return r.Status().Update(ctx, latestPolicy)
-					}); updateErr != nil {
-						log.Error(updateErr, "Failed to update policy status")
-					}
-					return nil
-				}
-
-				if allPassed {
-					log.Info("All pre-conditions passed during startup (non-blocking mode), proceeding with resume")
-					// Update pre-conditions status
-					now := metav1.Now()
-					status := &appsv1alpha1.PreConditionsStatus{
-						Checking:      false,
-						LastCheckedAt: &now,
-						Passed:        true,
-						Message:       "All pre-conditions passed",
-					}
-					if updateErr := r.updatePreConditionsStatus(ctx, policy, status); updateErr != nil {
-						log.Error(updateErr, "Failed to update pre-conditions status")
-					}
-					// Continue with resume below
-				} else {
-					// Pre-conditions not ready yet
-					log.Info("⏳ Pre-conditions not ready yet (non-blocking startup)",
-						"policy", policy.Name,
-						"message", message)
-					// Update status with retry to handle conflicts
-					if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-						latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-						if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-							return getErr
-						}
-						now := metav1.Now()
-						latestPolicy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{
-							Checking:      true,
-							LastCheckedAt: &now,
-							Passed:        false,
-							Message:       message,
-						}
-						latestPolicy.Status.Phase = appsv1alpha1.PhaseResuming
-						latestPolicy.Status.Message = "Waiting for pre-conditions (non-blocking mode - other policies continue)"
-						latestPolicy.Status.PendingStartupResume = true
-						return r.Status().Update(ctx, latestPolicy)
-					}); updateErr != nil {
-						log.Error(updateErr, "Failed to update policy status")
-					}
-					return nil
-				}
-			}
+				patchBase := latestPolicy.DeepCopy()
+				latestPolicy.Status.Phase = policy.Status.Phase
+				latestPolicy.Status.Message = policy.Status.Message
+				latestPolicy.Status.PreConditionsStatus = policy.Status.PreConditionsStatus
+				latestPolicy.Status.PendingStartupResume = policy.Status.PendingStartupResume
+				latestPolicy.Status.StartupResumeDelayStartedAt = policy.Status.StartupResumeDelayStartedAt
+				latestPolicy.Status.LastStartupAction = policy.Status.LastStartupAction
+				latestPolicy.Status.LastStartupAt = policy.Status.LastStartupAt
+				return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
+			})
 		}
 
+		// If no pre-conditions (or disabled), proceed with standard resume
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
 			log.Info("🚀 Startup policy: using adaptive throttling for resume",
@@ -778,9 +700,6 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		}
 		policy.Status.LastResumeAt = &now
 		policy.Status.LastStartupAction = "RESUME_APPLIED"
-		// NOTE: Do NOT set LastHandledOperationId here!
-		// Startup policy is independent of manual operations (spec.action/operationId)
-		// Setting it here would incorrectly mark manual operations as handled
 		log.Info("✅ Startup policy applied: resumed", "policy", policy.Name)
 	}
 
@@ -887,7 +806,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 					"conflictsWith", p.Name,
 					"reason", "Namespace already managed by another policy")
 
-				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, msg, false); err != nil {
+				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, msg); err != nil {
 					log.Error(err, "Failed to update status for duplicate policy")
 					return ctrl.Result{}, err
 				}
@@ -1137,6 +1056,18 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 					"policy", policy.Name,
 					"targetNamespace", policy.Spec.TargetNamespace)
 
+				// Non-blocking pre-conditions check
+				if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
+					if policy.Status.PreConditionsStatus == nil || !policy.Status.PreConditionsStatus.Passed {
+						log.Info("⏳ Startup resume waiting for pre-conditions to pass (background)",
+							"policy", policy.Name,
+							"status", "waiting")
+						// Requeue to check again after a short delay
+						return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+					}
+					log.Info("✅ Pre-conditions passed, proceeding with delayed startup resume", "policy", policy.Name)
+				}
+
 				// Execute the resume operation
 				deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
 				if err != nil {
@@ -1170,142 +1101,6 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 						"startupResumePriority", priority,
 						"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
 						"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
-				}
-
-				// Check pre-conditions before resuming (for delayed startup resume)
-				if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
-					// Check if pre-conditions should block the priority chain
-					// Default to true if not specified (nil)
-					blockPriorityChain := true
-					if policy.Spec.PreConditions.BlockPriorityChain != nil {
-						blockPriorityChain = *policy.Spec.PreConditions.BlockPriorityChain
-					}
-
-					log.Info("Checking pre-conditions before delayed startup resume",
-						"appReadinessChecks", len(policy.Spec.PreConditions.AppReadinessChecks),
-						"healthEndpointChecks", len(policy.Spec.PreConditions.HealthEndpointChecks),
-						"blockPriorityChain", blockPriorityChain)
-
-					if blockPriorityChain {
-						// Blocking mode: wait for pre-conditions synchronously
-						if err := r.waitForPreConditions(ctx, &policy, true); err != nil {
-							// Check if cancelled due to Freeze action
-							if strings.Contains(err.Error(), "cancelled") {
-								log.Info("Pre-conditions cancelled during delayed startup resume - action changed")
-								return ctrl.Result{Requeue: true}, nil // Requeue to handle new action
-							}
-							// Check if it's a timeout error
-							if strings.Contains(err.Error(), "timeout") {
-								log.Error(err, "Pre-conditions timeout reached during delayed startup resume")
-								policy.Status.Phase = appsv1alpha1.PhaseFailed
-								policy.Status.Message = fmt.Sprintf("Delayed startup resume failed: pre-conditions timeout: %v", err)
-								policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_TIMEOUT"
-								policy.Status.PendingStartupResume = false
-								if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-									latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-									if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-										return getErr
-									}
-									latestPolicy.Status = policy.Status
-									return r.Status().Update(ctx, latestPolicy)
-								}); updateErr != nil {
-									log.Error(updateErr, "Failed to update status")
-								}
-								return ctrl.Result{}, nil // Don't retry on timeout
-							}
-							log.Error(err, "Failed to check pre-conditions during delayed startup resume")
-							policy.Status.Phase = appsv1alpha1.PhaseFailed
-							policy.Status.Message = fmt.Sprintf("Delayed startup resume failed: pre-conditions check failed: %v", err)
-							policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_ERROR"
-							policy.Status.PendingStartupResume = false
-							if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-								latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-									return getErr
-								}
-								latestPolicy.Status = policy.Status
-								return r.Status().Update(ctx, latestPolicy)
-							}); updateErr != nil {
-								log.Error(updateErr, "Failed to update status")
-							}
-							return ctrl.Result{}, err
-						}
-
-						log.Info("All pre-conditions passed, proceeding with delayed startup resume")
-					} else {
-						// Non-blocking mode: check pre-conditions once, if passed proceed, otherwise return and let reconcile loop handle it
-						log.Info("Pre-conditions enabled in non-blocking mode (delayed) - checking once",
-							"policy", policy.Name)
-
-						allPassed, message, checkErr := r.checkPreConditions(ctx, &policy)
-						if checkErr != nil {
-							log.Error(checkErr, "Failed to check pre-conditions during delayed startup (non-blocking mode)")
-							// Update status but don't fail - let reconcile loop retry
-							now := metav1.Now()
-							status := &appsv1alpha1.PreConditionsStatus{
-								Checking:      true,
-								LastCheckedAt: &now,
-								Passed:        false,
-								Message:       fmt.Sprintf("Error checking pre-conditions: %v", checkErr),
-							}
-							policy.Status.PreConditionsStatus = status
-							policy.Status.Phase = appsv1alpha1.PhaseResuming
-							policy.Status.Message = "Waiting for pre-conditions (non-blocking mode)"
-							policy.Status.PendingStartupResume = true // Keep pending so reconcile continues
-							if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-								latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-									return getErr
-								}
-								latestPolicy.Status = policy.Status
-								return r.Status().Update(ctx, latestPolicy)
-							}); updateErr != nil {
-								log.Error(updateErr, "Failed to update status")
-							}
-							return ctrl.Result{RequeueAfter: time.Duration(policy.Spec.PreConditions.CheckInterval) * time.Second}, nil
-						}
-
-						if allPassed {
-							log.Info("All pre-conditions passed during delayed startup (non-blocking mode), proceeding with resume")
-							// Update pre-conditions status
-							now := metav1.Now()
-							status := &appsv1alpha1.PreConditionsStatus{
-								Checking:      false,
-								LastCheckedAt: &now,
-								Passed:        true,
-								Message:       "All pre-conditions passed",
-							}
-							policy.Status.PreConditionsStatus = status
-							// Continue with resume below
-						} else {
-							// Pre-conditions not ready yet
-							log.Info("Pre-conditions not ready yet (non-blocking mode delayed), reconcile loop will continue checking",
-								"policy", policy.Name, "message", message)
-							now := metav1.Now()
-							status := &appsv1alpha1.PreConditionsStatus{
-								Checking:      true,
-								LastCheckedAt: &now,
-								Passed:        false,
-								Message:       message,
-							}
-							policy.Status.PreConditionsStatus = status
-							policy.Status.Phase = appsv1alpha1.PhaseResuming
-							policy.Status.Message = "Waiting for pre-conditions (non-blocking mode - other policies continue)"
-							policy.Status.PendingStartupResume = true // Keep pending so reconcile continues
-							if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-								latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-									return getErr
-								}
-								latestPolicy.Status = policy.Status
-								return r.Status().Update(ctx, latestPolicy)
-							}); updateErr != nil {
-								log.Error(updateErr, "Failed to update status")
-							}
-							// Requeue to continue checking
-							return ctrl.Result{RequeueAfter: time.Duration(policy.Spec.PreConditions.CheckInterval) * time.Second}, nil
-						}
-					}
 				}
 
 				// Check if adaptive throttling is enabled
@@ -1583,7 +1378,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 			// Update status without setting lastHandledOperationId (allow retry when namespace is created)
 			// DO NOT set LastHandledOperationId - we want to retry when namespace is created
-			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg, false); err != nil {
+			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg); err != nil {
 				log.Error(err, "Failed to update status")
 				return ctrl.Result{}, err
 			}
@@ -1595,7 +1390,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Other error (permissions, api server down, etc) - this should be retried
 		log.Error(err, "Failed to get target namespace")
 
-		if statusErr := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, fmt.Sprintf("Failed to get namespace: %v", err), false); statusErr != nil {
+		if statusErr := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, fmt.Sprintf("Failed to get namespace: %v", err)); statusErr != nil {
 			log.Error(statusErr, "Failed to update status")
 		}
 
@@ -1664,90 +1459,34 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			return ctrl.Result{RequeueAfter: checkInterval}, nil
 		}
 
-		// All pre-conditions passed - proceed with startup resume
-		log.Info("✅ All pre-conditions passed, proceeding with startup resume",
+		// All pre-conditions passed - update status and let the standard startup resume flow take over
+		log.Info("✅ All pre-conditions passed for background startup resume",
 			"policy", policy.Name)
-		now := metav1.Now()
-		policy.Status.PreConditionsStatus.Checking = false
-		policy.Status.PreConditionsStatus.Passed = true
-		policy.Status.PreConditionsStatus.LastCheckedAt = &now
-		policy.Status.PreConditionsStatus.Message = "All pre-conditions passed"
-		policy.Status.PendingStartupResume = false
 
-		// Now perform the actual resume operation
-		deployments, err := r.listDeployments(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-		if err != nil {
-			log.Error(err, "Failed to list deployments for startup resume")
-			return ctrl.Result{}, err
-		}
-		statefulSets, err := r.listStatefulSets(ctx, policy.Spec.TargetNamespace, policy.Spec.Selector)
-		if err != nil {
-			log.Error(err, "Failed to list statefulsets for startup resume")
-			return ctrl.Result{}, err
-		}
-
-		// Check if adaptive throttling is enabled
-		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
-			log.Info("🚀 Pre-conditions passed - resuming with adaptive throttling",
-				"policy", policy.Name,
-				"workloads", len(deployments.Items)+len(statefulSets.Items))
-
-			if err := r.resumeWithAdaptiveThrottling(ctx, &policy, deployments, statefulSets, true); err != nil {
-				if err.Error() == "operation aborted due to manual override" {
-					log.Info("🛑 Resume aborted due to manual override", "policy", policy.Name)
-					return ctrl.Result{}, nil
-				}
-				log.Error(err, "Failed to resume with adaptive throttling")
-				return ctrl.Result{}, err
-			}
-		} else {
-			// Resume all workloads immediately
-			log.Info("⚡ Pre-conditions passed - resuming all workloads immediately",
-				"policy", policy.Name,
-				"workloads", len(deployments.Items)+len(statefulSets.Items))
-
-			for i := range deployments.Items {
-				deployment := &deployments.Items[i]
-				if err := r.resumeDeployment(ctx, deployment); err != nil {
-					log.Error(err, "Failed to resume deployment", "name", deployment.Name)
-				}
-			}
-			for i := range statefulSets.Items {
-				sts := &statefulSets.Items[i]
-				if err := r.resumeStatefulSet(ctx, sts); err != nil {
-					log.Error(err, "Failed to resume statefulset", "name", sts.Name)
-				}
-			}
-		}
-
-		// Update final status with retry to handle conflicts
-		deploymentCount := len(deployments.Items)
-		statefulSetCount := len(statefulSets.Items)
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 			if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
 				return getErr
 			}
-			latestPolicy.Status.Phase = appsv1alpha1.PhaseResumed
-			latestPolicy.Status.Message = fmt.Sprintf("Successfully resumed after pre-conditions passed (%d deployments, %d statefulsets)",
-				deploymentCount, statefulSetCount)
-			nowResume := metav1.Now()
-			latestPolicy.Status.LastResumeAt = &nowResume
-			if latestPolicy.Status.PreConditionsStatus != nil {
-				latestPolicy.Status.PreConditionsStatus.Checking = false
-				latestPolicy.Status.PreConditionsStatus.Passed = true
-				latestPolicy.Status.PreConditionsStatus.LastCheckedAt = &nowResume
-				latestPolicy.Status.PreConditionsStatus.Message = "All pre-conditions passed"
+			now := metav1.Now()
+			if latestPolicy.Status.PreConditionsStatus == nil {
+				latestPolicy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{}
 			}
-			latestPolicy.Status.PendingStartupResume = false
+			latestPolicy.Status.PreConditionsStatus.Checking = false
+			latestPolicy.Status.PreConditionsStatus.Passed = true
+			latestPolicy.Status.PreConditionsStatus.LastCheckedAt = &now
+			latestPolicy.Status.PreConditionsStatus.Message = "All pre-conditions passed"
+
+			// We DO NOT set PendingStartupResume = false here.
+			// We want the other branch to pick up the actual resume operation.
+
 			return r.Status().Update(ctx, latestPolicy)
-		}); err != nil {
-			log.Error(err, "Failed to update status after resume")
-			return ctrl.Result{}, err
+		}); updateErr != nil {
+			log.Error(updateErr, "Failed to update pre-conditions status")
 		}
 
-		log.Info("✅ Startup resume completed after pre-conditions passed", "policy", policy.Name)
-		return ctrl.Result{}, nil
+		// Requeue immediately to let the PendingStartupResume branch handle the resume
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	log.Info("Preparing to execute operation", "action", policy.Spec.Action, "namespace", policy.Spec.TargetNamespace)
@@ -1760,7 +1499,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		phase = appsv1alpha1.PhaseResuming
 	}
 
-	if err := r.updateStatus(ctx, &policy, phase, "Processing request", false); err != nil {
+	if err := r.updateStatus(ctx, &policy, phase, "Processing request"); err != nil {
 		log.Error(err, "Failed to update status to processing")
 		return ctrl.Result{}, err
 	}
@@ -1770,7 +1509,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if err != nil {
 		log.Error(err, "Failed to list deployments")
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-			fmt.Sprintf("Failed to list deployments: %v", err), false); err != nil {
+			fmt.Sprintf("Failed to list deployments: %v", err)); err != nil {
 			log.Error(err, "Failed to update status")
 		}
 		return ctrl.Result{}, err
@@ -1781,7 +1520,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	if err != nil {
 		log.Error(err, "Failed to list statefulsets")
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-			fmt.Sprintf("Failed to list statefulsets: %v", err), false); err != nil {
+			fmt.Sprintf("Failed to list statefulsets: %v", err)); err != nil {
 			log.Error(err, "Failed to update status")
 		}
 		return ctrl.Result{}, err
@@ -1803,7 +1542,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		if policy.Spec.Action == appsv1alpha1.LifecycleActionResume {
 			phase = appsv1alpha1.PhaseResumed
 		}
-		if err := r.updateStatus(ctx, &policy, phase, msg, false); err != nil {
+		if err := r.updateStatus(ctx, &policy, phase, msg); err != nil {
 			log.Error(err, "Failed to update status")
 		}
 		return ctrl.Result{}, nil
@@ -1821,7 +1560,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			if err := r.freezeDeployment(ctx, deployment, &policy); err != nil {
 				log.Error(err, "Failed to freeze deployment", "name", deployment.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to freeze deployment %s: %v", deployment.Name, err), false); err != nil {
+					fmt.Sprintf("Failed to freeze deployment %s: %v", deployment.Name, err)); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -1835,7 +1574,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			if err := r.freezeStatefulSet(ctx, sts, &policy); err != nil {
 				log.Error(err, "Failed to freeze statefulset", "name", sts.Name)
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to freeze statefulset %s: %v", sts.Name, err), false); err != nil {
+					fmt.Sprintf("Failed to freeze statefulset %s: %v", sts.Name, err)); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -1849,7 +1588,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// Update status to frozen
 		if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFrozen,
 			fmt.Sprintf("Successfully froze %d deployments and %d statefulsets",
-				len(deployments.Items), len(statefulSets.Items)), false); err != nil {
+				len(deployments.Items), len(statefulSets.Items))); err != nil {
 			log.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}
@@ -1864,119 +1603,14 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				"namespace", policy.Spec.TargetNamespace)
 
 			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseResumed,
-				"No workloads require resume (all already resumed)", false); err != nil {
+				"No workloads require resume (all already resumed)"); err != nil {
 				log.Error(err, "Failed to update status")
 				return ctrl.Result{}, err
 			}
 			return ctrl.Result{}, nil
 		}
 
-		// Check pre-conditions before resuming
-		if policy.Spec.PreConditions != nil && policy.Spec.PreConditions.Enabled {
-			// Check if pre-conditions should block
-			// Default to true if not specified (nil)
-			blockPriorityChain := true
-			if policy.Spec.PreConditions.BlockPriorityChain != nil {
-				blockPriorityChain = *policy.Spec.PreConditions.BlockPriorityChain
-			}
-
-			log.Info("Checking pre-conditions before resume",
-				"appReadinessChecks", len(policy.Spec.PreConditions.AppReadinessChecks),
-				"healthEndpointChecks", len(policy.Spec.PreConditions.HealthEndpointChecks),
-				"blockPriorityChain", blockPriorityChain)
-
-			// Update status to Resuming phase while checking pre-conditions
-			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseResuming, "Checking pre-conditions before resume", false); err != nil {
-				log.Error(err, "Failed to update status")
-				return ctrl.Result{}, err
-			}
-
-			if blockPriorityChain {
-				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, &policy, false); err != nil {
-					// Check if cancelled due to action change (e.g., Freeze)
-					if strings.Contains(err.Error(), "cancelled") {
-						log.Info("Pre-conditions cancelled - action changed, requeuing to handle new action")
-						return ctrl.Result{Requeue: true}, nil // Requeue to handle new action
-					}
-					// Check if it's a timeout error
-					if strings.Contains(err.Error(), "timeout") {
-						log.Error(err, "Pre-conditions timeout reached")
-						if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-							fmt.Sprintf("Pre-conditions timeout: %v", err), false); err != nil {
-							log.Error(err, "Failed to update status")
-						}
-						return ctrl.Result{}, nil // Don't retry on timeout
-					}
-					log.Error(err, "Failed to check pre-conditions")
-					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Pre-conditions check failed: %v", err), false); err != nil {
-						log.Error(err, "Failed to update status")
-					}
-					return ctrl.Result{}, err
-				}
-
-				log.Info("All pre-conditions passed, proceeding with resume")
-			} else {
-				// Non-blocking mode: check pre-conditions once, requeue if not ready
-				allPassed, message, err := r.checkPreConditions(ctx, &policy)
-				if err != nil {
-					// Fatal error - set phase to Failed
-					if strings.Contains(err.Error(), "timeout") {
-						log.Error(err, "Pre-conditions timeout reached")
-						if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-							fmt.Sprintf("Pre-conditions timeout: %v", err), false); err != nil {
-							log.Error(err, "Failed to update status")
-						}
-						return ctrl.Result{}, nil // Don't retry on timeout
-					}
-					log.Error(err, "Failed to check pre-conditions")
-					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Pre-conditions check failed: %v", err), false); err != nil {
-						log.Error(err, "Failed to update status")
-					}
-					return ctrl.Result{}, err
-				}
-
-				if !allPassed {
-					// Pre-conditions not ready yet - update status and requeue
-					now := metav1.Now()
-					status := &appsv1alpha1.PreConditionsStatus{
-						Checking:      true,
-						LastCheckedAt: &now,
-						Passed:        false,
-						Message:       message,
-					}
-					if err := r.updatePreConditionsStatus(ctx, &policy, status); err != nil {
-						log.Error(err, "Failed to update pre-conditions status")
-					}
-					// Requeue after checkInterval to check again
-					checkInterval := time.Duration(policy.Spec.PreConditions.CheckInterval) * time.Second
-					if checkInterval == 0 {
-						checkInterval = 5 * time.Second
-					}
-					log.Info("⏳ Pre-conditions check (non-blocking)",
-						"policy", policy.Name,
-						"passed", false,
-						"message", message,
-						"nextCheckIn", checkInterval)
-					return ctrl.Result{RequeueAfter: checkInterval}, nil
-				}
-
-				// All pre-conditions passed - update status and proceed
-				now := metav1.Now()
-				status := &appsv1alpha1.PreConditionsStatus{
-					Checking:      false,
-					LastCheckedAt: &now,
-					Passed:        true,
-					Message:       "All pre-conditions passed",
-				}
-				if err := r.updatePreConditionsStatus(ctx, &policy, status); err != nil {
-					log.Error(err, "Failed to update pre-conditions status")
-				}
-				log.Info("All pre-conditions passed, proceeding with resume")
-			}
-		}
+		// Execute the resume operation
 
 		// Check if adaptive throttling is enabled
 		if policy.Spec.AdaptiveThrottling != nil && policy.Spec.AdaptiveThrottling.Enabled {
@@ -1993,7 +1627,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				}
 				log.Error(err, "Failed to resume with adaptive throttling")
 				if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-					fmt.Sprintf("Failed to resume: %v", err), false); err != nil {
+					fmt.Sprintf("Failed to resume namespace: %v", err)); err != nil {
 					log.Error(err, "Failed to update status")
 				}
 				return ctrl.Result{}, err
@@ -2011,7 +1645,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				if err := r.resumeDeployment(ctx, deployment); err != nil {
 					log.Error(err, "Failed to resume deployment", "name", deployment.Name)
 					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err), false); err != nil {
+						fmt.Sprintf("Failed to resume deployment %s: %v", deployment.Name, err)); err != nil {
 						log.Error(err, "Failed to update status")
 					}
 					return ctrl.Result{}, err
@@ -2025,7 +1659,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				if err := r.resumeStatefulSet(ctx, sts); err != nil {
 					log.Error(err, "Failed to resume statefulset", "name", sts.Name)
 					if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed,
-						fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err), false); err != nil {
+						fmt.Sprintf("Failed to resume statefulset %s: %v", sts.Name, err)); err != nil {
 						log.Error(err, "Failed to update status")
 					}
 					return ctrl.Result{}, err
@@ -2811,8 +2445,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkPreConditions(ctx context.Cont
 
 // waitForPreConditions waits for all pre-conditions to pass
 // Returns error if timeout is reached or fatal error occurs
-// isStartupOperation: if true, ignores spec.action changes (startup operations only respect spec.startupPolicy)
-func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, isStartupOperation bool) error {
+func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) error {
 	log := logf.FromContext(ctx)
 
 	if policy.Spec.PreConditions == nil || !policy.Spec.PreConditions.Enabled {
@@ -2885,19 +2518,11 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Co
 				hasNewOperation := latestPolicy.Spec.OperationId != "" &&
 					latestPolicy.Spec.OperationId != latestPolicy.Status.LastHandledOperationId
 
-				// SAFETY CHECK: If this is a startup operation and LastHandledOperationId is empty,
-				// this "new" operation is likely just a stale one from before status was created/reset.
-				// We should ignore it to allow startup policy to proceed.
-				if isStartupOperation && latestPolicy.Status.LastHandledOperationId == "" {
-					hasNewOperation = false
-				}
-
 				if hasNewOperation && latestPolicy.Spec.Action == appsv1alpha1.LifecycleActionFreeze {
 					log.Info("🛑 New manual Freeze operation detected - cancelling pre-conditions wait",
 						"policy", policy.Name,
 						"newOperationId", latestPolicy.Spec.OperationId,
-						"lastHandledOperationId", latestPolicy.Status.LastHandledOperationId,
-						"isStartupOperation", isStartupOperation)
+						"lastHandledOperationId", latestPolicy.Status.LastHandledOperationId)
 					now := metav1.Now()
 					status.Checking = false
 					status.Passed = false

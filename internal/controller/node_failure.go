@@ -223,6 +223,9 @@ func (r *NamespaceLifecyclePolicyReconciler) forceDeleteTerminatingPods(
 	if deleted > 0 {
 		log.Info("🗑️ Force-deleted terminating pods on failed node",
 			"policy", policy.Name, "count", deleted, "node", failedNode)
+	} else {
+		log.Info("✅ No terminating pods found on failed node",
+			"policy", policy.Name, "node", failedNode)
 	}
 }
 
