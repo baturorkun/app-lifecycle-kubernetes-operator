@@ -104,7 +104,7 @@ func TestIsBlockedByHigherPriority(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Name: "p2", UID: "uid2"},
 					Spec: appsv1alpha1.NamespaceLifecyclePolicySpec{
 						StartupResumePriority: 10, // higher priority
-						PreConditions: &appsv1alpha1.PreConditionsOptions{
+						PreConditions: &appsv1alpha1.PreConditionsConfig{
 							BlockPriorityChain: func() *bool { b := false; return &b }(),
 						},
 					},

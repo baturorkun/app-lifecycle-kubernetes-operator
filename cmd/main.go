@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -155,6 +156,81 @@ func waitForReplicasZero(ctx context.Context, k8sClient client.Client, namespace
 	}
 }
 
+// NodeFailurePreScan inspects the supplied resume policies for NotReady nodes and
+// handles any with handleNodeFailure=true synchronously.  It returns a filtered slice
+// containing only those policies that should still be processed by the normal startup
+// resume loop (i.e. ones with handleNodeFailure==false).  The returned string slice is
+// the list of policy names handled in the order they were processed; tests rely on the
+// ordering to verify priority.
+func NodeFailurePreScan(ctx context.Context, k8sClient client.Client, resumePolicies []*appsv1alpha1.NamespaceLifecyclePolicy) ([]*appsv1alpha1.NamespaceLifecyclePolicy, []string, error) {
+	// sort by startupResumePriority (lower number = higher priority)
+	sort.Slice(resumePolicies, func(i, j int) bool {
+		pi := resumePolicies[i].Spec.StartupResumePriority
+		if pi == 0 {
+			pi = 100
+		}
+		pj := resumePolicies[j].Spec.StartupResumePriority
+		if pj == 0 {
+			pj = 100
+		}
+		if pi != pj {
+			return pi < pj
+		}
+		return resumePolicies[i].CreationTimestamp.Before(&resumePolicies[j].CreationTimestamp)
+	})
+
+	var handledOrder []string
+	filtered := make([]*appsv1alpha1.NamespaceLifecyclePolicy, 0, len(resumePolicies))
+
+	nodeList := &corev1.NodeList{}
+	if err := k8sClient.List(ctx, nodeList); err != nil {
+		// if we can't list nodes just return original slice unchanged
+		return resumePolicies, handledOrder, err
+	}
+	var failedNodeNames []string
+	for i := range nodeList.Items {
+		node := &nodeList.Items[i]
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
+				failedNodeNames = append(failedNodeNames, node.Name)
+				break
+			}
+		}
+	}
+	if len(failedNodeNames) == 0 {
+		return resumePolicies, handledOrder, nil
+	}
+
+	failedNode := failedNodeNames[0]
+	for _, policy := range resumePolicies {
+		if !policy.Spec.HandleNodeFailure {
+			filtered = append(filtered, policy)
+			continue
+		}
+		// process high-priority first thanks to sort above
+		handlerLog := logr.FromContextOrDiscard(ctx).WithValues("policy", policy.Name, "failedNode", failedNode)
+		handlerLog.Info("Startup pre-scan: performing synchronous scale-down before resume")
+
+		// Idempotency check
+		alreadyHandled := policy.Status.FailedNodeName == failedNode &&
+			policy.Status.NodeFailureEventHandledAt != nil &&
+			(policy.Status.NodeFailureEventDetectedAt == nil ||
+				policy.Status.NodeFailureEventHandledAt.After(policy.Status.NodeFailureEventDetectedAt.Time))
+		if !alreadyHandled {
+			if err := (&controller.NamespaceLifecyclePolicyReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}).HandleNodeFailureAtStartup(ctx, policy, failedNode); err != nil {
+				handlerLog.Error(err, "Startup pre-scan: failed to handle node failure for policy")
+				return resumePolicies, handledOrder, err
+			}
+		} else {
+			handlerLog.Info("✅ Startup pre-scan: node failure already handled for this failure event — skipping")
+		}
+		// record even if already handled so order is known
+		handledOrder = append(handledOrder, policy.Name)
+		// do not add to filtered; resume suppressed
+	}
+	return filtered, handledOrder, nil
+}
+
 // applyStartupPolicies applies startup policies for all existing NamespaceLifecyclePolicy resources
 // This runs once when the operator starts, before the controller starts processing events
 // Freeze policies are processed first (by freezePriority: 0, 1, 2...), then resume policies (by startupResumePriority)
@@ -208,6 +284,15 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	// The priority chain wait is now handled autonomously by the Reconciler
 	// ============================================================================
 	if len(freezePolicies) > 0 {
+		// sort by freezePriority so any synchronous handling respects order
+		sort.Slice(freezePolicies, func(i, j int) bool {
+			pi := freezePolicies[i].Spec.FreezePriority
+			pj := freezePolicies[j].Spec.FreezePriority
+			if pi != pj {
+				return pi < pj
+			}
+			return freezePolicies[i].CreationTimestamp.Before(&freezePolicies[j].CreationTimestamp)
+		})
 		setupLog.Info("🥶 ========== STARTUP FREEZE: PROCESSING FREEZE POLICIES ==========")
 
 		// Process all freeze policies in parallel.
@@ -232,74 +317,30 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 
 	// ============================================================================
 	// NODE FAILURE PRE-SCAN
-	// Detect NotReady nodes BEFORE processing resume policies.
-	// Policies with handleNodeFailure=true are scaled down SYNCHRONOUSLY here, before
-	// STARTUP RESUME processes any workloads.  The scale-down removes fully-local workloads from
-	// the failed node so that STARTUP RESUME only resumes workloads destined for healthy nodes.
-	// After scale-down the reconcile loop re-resumes via PendingStartupResume=true.
 	// ============================================================================
-	nodeList := &corev1.NodeList{}
-	if err := k8sClient.List(ctx, nodeList); err != nil {
-		setupLog.Error(err, "Startup: failed to list nodes for node failure pre-scan — skipping")
+	filtered, order, err := NodeFailurePreScan(ctx, k8sClient, resumePolicies)
+	if err != nil {
+		setupLog.Error(err, "Startup: node failure pre-scan encountered error — continuing")
 	} else {
-		var failedNodeNames []string
-		for i := range nodeList.Items {
-			node := &nodeList.Items[i]
-			// Check NodeReady condition
-			for _, cond := range node.Status.Conditions {
-				if cond.Type == corev1.NodeReady && cond.Status != corev1.ConditionTrue {
-					failedNodeNames = append(failedNodeNames, node.Name)
-					break
-				}
-			}
-		}
-
-		if len(failedNodeNames) > 0 {
-			setupLog.Info("🔴 Startup: NotReady nodes detected — scaling down affected workloads BEFORE startup resume",
-				"failedNodes", failedNodeNames)
-
-			failedNode := failedNodeNames[0] // use the first failed node; real-time watcher handles subsequent ones
-
-			var filteredResumePolicies []*appsv1alpha1.NamespaceLifecyclePolicy
-			for _, policy := range resumePolicies {
-				if !policy.Spec.HandleNodeFailure {
-					filteredResumePolicies = append(filteredResumePolicies, policy)
-					continue
-				}
-
-				setupLog.Info("🔴 Startup pre-scan: performing synchronous scale-down before resume",
-					"policy", policy.Name,
-					"failedNode", failedNode)
-
-				// Idempotency: only run if not already handled for this exact failure
-				alreadyHandled := policy.Status.FailedNodeName == failedNode &&
-					policy.Status.NodeFailureEventHandledAt != nil &&
-					(policy.Status.NodeFailureEventDetectedAt == nil ||
-						policy.Status.NodeFailureEventHandledAt.After(policy.Status.NodeFailureEventDetectedAt.Time))
-
-				if !alreadyHandled {
-					if err := reconciler.HandleNodeFailureAtStartup(ctx, policy, failedNode); err != nil {
-						setupLog.Error(err, "Startup pre-scan: failed to handle node failure for policy", "policy", policy.Name)
-						// Still suppress resume on failure — safer than resuming into a degraded cluster
-					}
-				} else {
-					setupLog.Info("✅ Startup pre-scan: node failure already handled for this failure event — skipping scale-down",
-						"policy", policy.Name,
-						"failedNode", failedNode)
-				}
-				// Do NOT add to filteredResumePolicies — startup resume is suppressed here;
-				// the reconcile loop will re-resume via PendingStartupResume=true.
-			}
-			resumePolicies = filteredResumePolicies
-		} else {
-			setupLog.Info("✅ Startup: all nodes are Ready — node failure pre-scan passed")
-		}
+		resumePolicies = filtered
+		setupLog.V(1).Info("Startup pre-scan processed policies", "order", order)
 	}
+
+
 
 	// ============================================================================
 	// STARTUP RESUME: Process RESUME policies
 	// The priority chain wait is now handled autonomously by the Reconciler
 	// ============================================================================
+	// sort resume policies one more time before triggering (order should already be correct)
+	sort.Slice(resumePolicies, func(i, j int) bool {
+		pi := resumePolicies[i].Spec.StartupResumePriority
+		if pi == 0 { pi = 100 }
+		pj := resumePolicies[j].Spec.StartupResumePriority
+		if pj == 0 { pj = 100 }
+		if pi != pj { return pi < pj }
+		return resumePolicies[i].CreationTimestamp.Before(&resumePolicies[j].CreationTimestamp)
+	})
 	if len(resumePolicies) > 0 {
 		setupLog.Info("🚀 ========== STARTUP RESUME: PROCESSING RESUME POLICIES ==========")
 
