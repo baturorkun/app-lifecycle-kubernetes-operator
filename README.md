@@ -507,6 +507,11 @@ When the operator starts, it checks each policy's `startupPolicy`:
    > node‑failure pre‑scan.  This ensures that high‑priority recovery actions are
    > recorded (setting `pendingStartupResume`) *before* lower‑priority policies are
    > triggered, preventing out‑of‑order resumes when a NotReady node is detected.
+   >
+   > **Always enforced**: the operator checks for higher‑priority policies *before every
+   > resume* operation, even when there are no pre‑conditions configured.  A policy
+   > with `pendingStartupResume` or an in‑progress resume will block any lower
+   > priorities until it completes.
 2. Policies with the same priority are sorted by creation timestamp (older first)
 3. Policies with the same priority are processed in parallel
 4. Each policy waits for its `startupResumeDelay` (if configured)

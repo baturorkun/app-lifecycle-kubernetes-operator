@@ -69,6 +69,28 @@ func TestIsBlockedByHigherPriority(t *testing.T) {
 			wantBlocked: true,
 		},
 		{
+			name: "resume - higher priority policy pending startup resume",
+			targetPolicy: &appsv1alpha1.NamespaceLifecyclePolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "p1", UID: "uid1"},
+				Spec: appsv1alpha1.NamespaceLifecyclePolicySpec{
+					StartupResumePriority: 50,
+				},
+			},
+			otherPolicies: []*appsv1alpha1.NamespaceLifecyclePolicy{
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "p2", UID: "uid2"},
+					Spec: appsv1alpha1.NamespaceLifecyclePolicySpec{
+						StartupResumePriority: 10, // higher priority
+					},
+					Status: appsv1alpha1.NamespaceLifecyclePolicyStatus{
+						PendingStartupResume: true,
+					},
+				},
+			},
+			action:      appsv1alpha1.LifecycleActionResume,
+			wantBlocked: true,
+		},
+		{
 			name: "resume - higher priority policy is already resumed",
 			targetPolicy: &appsv1alpha1.NamespaceLifecyclePolicy{
 				ObjectMeta: metav1.ObjectMeta{Name: "p1", UID: "uid1"},
@@ -81,7 +103,7 @@ func TestIsBlockedByHigherPriority(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{Name: "p2", UID: "uid2"},
 					Spec: appsv1alpha1.NamespaceLifecyclePolicySpec{
 						StartupResumePriority: 10, // higher priority
-						Action: appsv1alpha1.LifecycleActionResume,
+						Action:                appsv1alpha1.LifecycleActionResume,
 					},
 					Status: appsv1alpha1.NamespaceLifecyclePolicyStatus{
 						Phase: appsv1alpha1.PhaseResumed,
@@ -135,4 +157,40 @@ func TestIsBlockedByHigherPriority(t *testing.T) {
 			assert.Equal(t, tt.wantBlocked, blocked)
 		})
 	}
+}
+
+// TestResumeLock verifies the acquire/release semantics of the resume lock helpers.
+func TestResumeLock(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = appsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &NamespaceLifecyclePolicyReconciler{Client: fakeClient, Scheme: scheme}
+	ctx := context.Background()
+	ns := "test-ns"
+
+	// initial acquire should succeed
+	locked, err := reconciler.acquireResumeLock(ctx, 50, ns)
+	assert.NoError(t, err)
+	assert.True(t, locked, "expected initial lock acquisition to succeed")
+
+	// same or lower priority should not acquire
+	locked, err = reconciler.acquireResumeLock(ctx, 50, ns)
+	assert.NoError(t, err)
+	assert.False(t, locked, "equal priority should be blocked")
+	locked, err = reconciler.acquireResumeLock(ctx, 100, ns)
+	assert.NoError(t, err)
+	assert.False(t, locked, "lower priority should be blocked")
+
+	// higher priority preempts
+	locked, err = reconciler.acquireResumeLock(ctx, 10, ns)
+	assert.NoError(t, err)
+	assert.True(t, locked, "higher priority should preempt the lock")
+
+	// release and then lower priority can obtain
+	err = reconciler.releaseResumeLock(ctx, ns)
+	assert.NoError(t, err)
+	locked, err = reconciler.acquireResumeLock(ctx, 100, ns)
+	assert.NoError(t, err)
+	assert.True(t, locked, "lock should be available after release")
 }

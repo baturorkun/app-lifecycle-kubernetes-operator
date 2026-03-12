@@ -326,8 +326,6 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 		setupLog.V(1).Info("Startup pre-scan processed policies", "order", order)
 	}
 
-
-
 	// ============================================================================
 	// STARTUP RESUME: Process RESUME policies
 	// The priority chain wait is now handled autonomously by the Reconciler
@@ -335,10 +333,16 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	// sort resume policies one more time before triggering (order should already be correct)
 	sort.Slice(resumePolicies, func(i, j int) bool {
 		pi := resumePolicies[i].Spec.StartupResumePriority
-		if pi == 0 { pi = 100 }
+		if pi == 0 {
+			pi = 100
+		}
 		pj := resumePolicies[j].Spec.StartupResumePriority
-		if pj == 0 { pj = 100 }
-		if pi != pj { return pi < pj }
+		if pj == 0 {
+			pj = 100
+		}
+		if pi != pj {
+			return pi < pj
+		}
 		return resumePolicies[i].CreationTimestamp.Before(&resumePolicies[j].CreationTimestamp)
 	})
 	if len(resumePolicies) > 0 {

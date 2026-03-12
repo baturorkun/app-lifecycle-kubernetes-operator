@@ -54,6 +54,12 @@ type NamespaceLifecyclePolicyReconciler struct {
 const (
 	// nilAnnotationValue is used when original terminationGracePeriodSeconds is nil
 	nilAnnotationValue = "nil"
+
+	// resumeLockConfigMapName is the name of the ConfigMap used to serialize
+	// resume operations. The object lives in the same namespace as the policy
+	// so that locks are scoped per-namespace (multiple namespaces can resume
+	// concurrently without affecting each other).
+	resumeLockConfigMapName = "namespacelifecyclepolicy-resume-lock"
 )
 
 // +kubebuilder:rbac:groups=apps.ops.dev,resources=namespacelifecyclepolicies,verbs=get;list;watch;create;update;patch;delete
@@ -297,6 +303,73 @@ func (r *NamespaceLifecyclePolicyReconciler) resumeDeployment(ctx context.Contex
 	})
 }
 
+// acquireResumeLock attempts to obtain a priority lock for a resume request.
+//
+// A ConfigMap identified by `resumeLockConfigMapName` is used as the mutex. If
+// no ConfigMap exists, the method will create one with the current priority
+// and succeed. If it already exists, the stored priority is compared:
+//
+//   * existing <= requested : the existing holder has higher or equal priority
+//     (lower number), so acquisition fails and `false` is returned. The caller
+//     should requeue and try again later.
+//   * existing > requested : the requester has higher priority and preempts the
+//     lock by updating the ConfigMap. Acquisition succeeds.
+//
+// The namespace argument determines where the ConfigMap is read/written; this
+// keeps locks independent across namespaces.
+func (r *NamespaceLifecyclePolicyReconciler) acquireResumeLock(ctx context.Context, priority int, namespace string) (bool, error) {
+	cm := &corev1.ConfigMap{}
+	err := r.Get(ctx, types.NamespacedName{Name: resumeLockConfigMapName, Namespace: namespace}, cm)
+	if errors.IsNotFound(err) {
+		cm = &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: resumeLockConfigMapName, Namespace: namespace},
+			Data: map[string]string{
+				"priority": strconv.Itoa(priority),
+				"timestamp": time.Now().Format(time.RFC3339),
+			},
+		}
+		if err := r.Create(ctx, cm); err != nil {
+			if errors.IsAlreadyExists(err) {
+				// someone else won the race; treat as locked-out
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+
+	existingPriority, _ := strconv.Atoi(cm.Data["priority"])
+	if existingPriority <= priority {
+		// higher or equal priority already holds the lock
+		return false, nil
+	}
+
+	// preempt a lower‑priority holder by updating the ConfigMap
+	cm.Data["priority"] = strconv.Itoa(priority)
+	cm.Data["timestamp"] = time.Now().Format(time.RFC3339)
+	if err := r.Update(ctx, cm); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// releaseResumeLock deletes the lock ConfigMap if it exists. This is invoked
+// after a resume operation completes, allowing queued lower-priority requests to
+// proceed. It is safe to call even if the ConfigMap was already removed by an
+// earlier reconcile.
+func (r *NamespaceLifecyclePolicyReconciler) releaseResumeLock(ctx context.Context, namespace string) error {
+	cm := &corev1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Name: resumeLockConfigMapName, Namespace: namespace}, cm); err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return r.Delete(ctx, cm)
+}
+
 // resumeStatefulSet restores the statefulset replicas from the annotation
 func (r *NamespaceLifecyclePolicyReconciler) resumeStatefulSet(ctx context.Context, sts *appsv1.StatefulSet) error {
 	log := ctrl.Log
@@ -454,6 +527,16 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		})
 	}
 
+	// PRIORITY CHECK: when running ApplyStartupPolicy we also respect resume priority
+	if action == appsv1alpha1.LifecycleActionResume {
+		if blocked, reason, err := r.isBlockedByHigherPriority(ctx, policy, action); err != nil {
+			log.Error(err, "Failed to evaluate priority blocking during ApplyStartupPolicy")
+			return err
+		} else if blocked {
+			log.Info("⏳ Startup policy application blocked by higher priority", "reason", reason)
+			return nil
+		}
+	}
 	// If requested action is Resume and the policy is already in Resumed phase, ignore it.
 	if action == appsv1alpha1.LifecycleActionResume && policy.Status.Phase == appsv1alpha1.PhaseResumed {
 		log.Info("⏩ Already resumed, no startup action needed", "policy", policy.Name)
@@ -467,6 +550,18 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			latestPolicy.Status.LastStartupAt = &now
 			return r.Status().Patch(ctx, latestPolicy, client.MergeFrom(patchBase))
 		})
+	}
+
+	// PRIORITY CHECK: when running at startup we also guard against higher-priority resumes
+	if action == appsv1alpha1.LifecycleActionResume {
+		if blocked, reason, err := r.isBlockedByHigherPriority(ctx, policy, action); err != nil {
+			log.Error(err, "Failed to evaluate priority blocking during ApplyStartupPolicy")
+			return err
+		} else if blocked {
+			log.Info("⏳ Startup action blocked by higher priority", "reason", reason)
+			// do not perform action now; leave status unmodified so reconcile will try later
+			return nil
+		}
 	}
 
 	// Apply startupResumeDelay if this is a Resume startup action
@@ -605,18 +700,44 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 		// Startup policy is independent of manual operations (spec.action/operationId)
 		log.Info("⏸️ Startup policy applied: frozen", "policy", policy.Name)
 	case appsv1alpha1.LifecycleActionResume:
+		// PRIORITY LOCK: attempts to acquire a cluster-wide lock before proceeding.
+		// This ensures manual resume requests respect `startupResumePriority` and
+		// don't race each other. Startup-mode resumes also use the same lock so
+		// they don't collide with manual actions.
+		// in startup context we may fire many resumes concurrently; to make sure
+		// they honour priority we retry acquiring the lock rather than failing.
+		p := int(policy.Spec.StartupResumePriority)
+		if p == 0 {
+			p = 100
+		}
+		for {
+			locked, err := r.acquireResumeLock(ctx, p, policy.Namespace)
+			if err != nil {
+				log.Error(err, "Failed to acquire resume lock")
+				return err
+			}
+			if locked {
+				break
+			}
+			// blocked by a higher-priority resume; wait a bit and retry
+			log.V(1).Info("Startup resume waiting for higher-priority operation to complete")
+			time.Sleep(time.Second)
+		}
+		// ensure lock is released when this method returns
+		defer func() {
+			if err := r.releaseResumeLock(ctx, policy.Namespace); err != nil {
+				log.Error(err, "Failed to release resume lock")
+			}
+		}()
+
 		// FILTER: Only count and process workloads that were actually frozen
 		deployments, statefulSets = r.filterWorkloadsRequiringResume(deployments, statefulSets)
 
 		// Very prominent log when startup resume begins
-		priority := policy.Spec.StartupResumePriority
-		if priority == 0 {
-			priority = 100
-		}
 		log.Info("🚀🚀🚀 ========== STARTUP RESUME OPERATION STARTING ========== 🚀🚀🚀",
 			"policy", policy.Name,
 			"targetNamespace", policy.Spec.TargetNamespace,
-			"startupResumePriority", priority,
+			"startupResumePriority", p,
 			"startupResumeDelay", policy.Spec.StartupResumeDelay.Duration,
 			"workloads", fmt.Sprintf("%d deployments, %d statefulsets", len(deployments.Items), len(statefulSets.Items)))
 
@@ -1070,6 +1191,14 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			// Fall through — the node failure branch handles the rest
 
 		} else {
+			// PRIORITY BLOCK: ensure a higher-priority policy isn't already resuming
+			if blocked, reason, err := r.isBlockedByHigherPriority(ctx, &policy, appsv1alpha1.LifecycleActionResume); err != nil {
+				log.Error(err, "Failed to evaluate priority blocking during pending startup resume")
+				return ctrl.Result{}, err
+			} else if blocked {
+				log.Info("⏳ Pending startup resume blocked by higher priority", "reason", reason)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
 			// 1. Check for manual operation override during startup delay
 			// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId)
 			// Stale actions (already handled) should not block startup resume.
@@ -1854,6 +1983,26 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		}
 
 	case appsv1alpha1.LifecycleActionResume:
+		// priority lock ensures manual resumes don't race each other
+		p := int(policy.Spec.StartupResumePriority)
+		if p == 0 {
+			p = 100
+		}
+		locked, err := r.acquireResumeLock(ctx, p, policy.Namespace)
+		if err != nil {
+			log.Error(err, "failed to acquire resume lock for manual operation")
+			return ctrl.Result{}, err
+		}
+		if !locked {
+			log.V(1).Info("Manual resume deferred due to higher-priority operation")
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
+		defer func() {
+			if err := r.releaseResumeLock(ctx, policy.Namespace); err != nil {
+				log.Error(err, "failed to release resume lock")
+			}
+		}()
+
 		// FILTER: Only count and process workloads that were actually frozen
 		deployments, statefulSets = r.filterWorkloadsRequiringResume(deployments, statefulSets)
 
@@ -2037,7 +2186,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 		// We need to update this field as well, but our updateStatus helper only updates Phase, Message and OperationId.
 		// Since we need to update a custom field (LastResumeAt) securely, we should use a custom retry block here.
 
-		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 			if err := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); err != nil {
 				return err
