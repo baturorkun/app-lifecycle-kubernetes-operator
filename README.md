@@ -501,6 +501,12 @@ When the operator starts, it checks each policy's `startupPolicy`:
 
 **Processing Order:**
 1. Policies are sorted by `startupResumePriority` (lower number = higher priority)
+
+   > **Node‑failure pre‑scan ordering**: during operator startup the controller now
+   > explicitly sorts resume policies by `startupResumePriority` before performing the
+   > node‑failure pre‑scan.  This ensures that high‑priority recovery actions are
+   > recorded (setting `pendingStartupResume`) *before* lower‑priority policies are
+   > triggered, preventing out‑of‑order resumes when a NotReady node is detected.
 2. Policies with the same priority are sorted by creation timestamp (older first)
 3. Policies with the same priority are processed in parallel
 4. Each policy waits for its `startupResumeDelay` (if configured)
