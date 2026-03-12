@@ -121,8 +121,8 @@ spec:
     # Continue building the YAML
     kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p="
 spec:
-  startupResumePriority: $PRIORITY
-  startupResumeDelay: ${DELAY}s
+  resumePriority: $PRIORITY
+  resumeDelay: ${DELAY}s
 "
 
     kubectl patch namespacelifecyclepolicy "$POLICY_NAME" -n default --type='merge' -p='

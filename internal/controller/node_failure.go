@@ -365,7 +365,7 @@ func (r *NamespaceLifecyclePolicyReconciler) HandleNodeFailureAtStartup(
 	// Set PendingStartupResume=true so the reconcile loop re-resumes workloads
 	// on the surviving nodes once scale-down is complete.
 	latest.Status.PendingStartupResume = true
-	latest.Status.StartupResumeDelayStartedAt = &handledAt
+	latest.Status.ResumeDelayStartedAt = &handledAt
 
 	if updateErr := r.Status().Update(ctx, latest); updateErr != nil {
 		log.Error(updateErr, "Startup pre-scan: failed to update policy status after node failure", "policy", policy.Name)

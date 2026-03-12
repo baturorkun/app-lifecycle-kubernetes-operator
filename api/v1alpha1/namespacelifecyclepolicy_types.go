@@ -151,28 +151,28 @@ type NamespaceLifecyclePolicySpec struct {
 	// +optional
 	StartupNodeReadinessPolicy *StartupNodeReadinessPolicy `json:"startupNodeReadinessPolicy,omitempty"`
 
-	// startupResumeDelay specifies how long to wait before starting a startup Resume operation.
-	// ONLY applies to startup resume operations (startupPolicy: Resume).
+	// resumeDelay specifies how long to wait before starting a Resume operation.
+	// Applies to both startup resume (startupPolicy: Resume) and node failure recovery.
 	// Does NOT apply to manual Resume operations (action: Resume) or Freeze operations.
-	// Useful for staggering multiple namespace resume operations during cluster startup
-	// to prevent simultaneous resume bursts that could overload nodes.
+	// Useful for staggering multiple namespace resume operations to prevent simultaneous
+	// resume bursts that could overload nodes.
 	// Default: 0s (no delay)
 	// +optional
 	// +kubebuilder:default="0s"
-	StartupResumeDelay metav1.Duration `json:"startupResumeDelay,omitempty"`
+	ResumeDelay metav1.Duration `json:"resumeDelay,omitempty"`
 
-	// startupResumePriority defines the priority order for startup resume operations.
+	// resumePriority defines the priority order for resume operations.
 	// Lower numbers have higher priority (e.g., 1 is processed before 2).
-	// Only applies when startupPolicy is Resume.
+	// Applies to both startup resume (startupPolicy: Resume) and node failure recovery.
 	// If not specified, default priority is 100 (processed after all specified priorities).
-	// Policies with the same priority are processed in creation order (older first).
-	// When combined with startupResumeDelay, policies are processed in priority order,
+	// Policies with the same priority are processed concurrently.
+	// When combined with resumeDelay, policies are processed in priority order,
 	// and each policy waits for its delay and resume completion before the next priority starts.
 	// +optional
 	// +kubebuilder:default=100
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=99999
-	StartupResumePriority int32 `json:"startupResumePriority,omitempty"`
+	ResumePriority int32 `json:"resumePriority,omitempty"`
 
 	// freezeDelay specifies how long to wait before starting a Freeze operation.
 	// Applies to both manual freeze operations (action: Freeze) and startup freeze (startupPolicy: Freeze).
@@ -656,10 +656,10 @@ type NamespaceLifecyclePolicyStatus struct {
 	// +optional
 	PendingStartupResume bool `json:"pendingStartupResume,omitempty"`
 
-	// startupResumeDelayStartedAt stores the timestamp when the startup resume delay began
+	// resumeDelayStartedAt stores the timestamp when the resume delay began
 	// Used in conjunction with pendingStartupResume to calculate remaining delay time
 	// +optional
-	StartupResumeDelayStartedAt *metav1.Time `json:"startupResumeDelayStartedAt,omitempty"`
+	ResumeDelayStartedAt *metav1.Time `json:"resumeDelayStartedAt,omitempty"`
 
 	// pendingFreeze indicates whether a freeze operation is pending (waiting for delay or priority)
 	// When true, the operator will wait for the delay period and priority ordering before freezing

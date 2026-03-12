@@ -8,7 +8,7 @@
 ## Architecture & Data Flow
 - **Freeze:** Scales target workloads to 0, stores original replica count in annotation.
 - **Resume:** Restores replicas from annotation, removes annotation.
-- **Startup Policy:** On operator start, policies are processed by `startupPolicy`, `startupResumePriority`, and `startupResumeDelay`.
+- **Startup Policy:** On operator start, policies are processed by `startupPolicy`, `resumePriority`, and `resumeDelay`.
 - **Adaptive Throttling:** Batch resume, slow/pause based on cluster health (CPU/mem, pending pods, restarts, node readiness). Metrics can be sourced from kubelet or custom endpoints (see `linux/metrics.py`).
 - **Pod Balancing:** Optionally triggers rolling restarts to rebalance pods when new nodes join.
 
@@ -26,7 +26,7 @@
 - **Status tracking:** All actions update CRD status fields (phase, message, lastHandledOperationId, etc).
 - **Label selectors:** Use `selector` in policy spec to target specific workloads.
 - **Grace periods:** Override shutdown times via `terminationGracePeriodSeconds` in policy spec.
-- **Startup ordering:** Use `startupResumePriority` and `startupResumeDelay` for controlled resume.
+- **Startup ordering:** Use `resumePriority` and `resumeDelay` for controlled resume.
 - **Node readiness:** Use `startupNodeReadinessPolicy` to wait for nodes before resuming.
 - **Custom metrics:** For RKE2 or restricted clusters, run `linux/metrics.py` as a node service and configure `adaptiveThrottling.signalChecks.checkNodeUsage.scrape`.
 

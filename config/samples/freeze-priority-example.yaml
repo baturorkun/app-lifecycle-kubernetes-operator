@@ -38,8 +38,8 @@ spec:
   freezeDelay: 0s
   
   # For startup resume after freeze
-  startupResumePriority: 100
-  startupResumeDelay: 0s
+  resumePriority: 100
+  resumeDelay: 0s
 
 ---
 apiVersion: apps.ops.dev/v1alpha1
@@ -61,8 +61,8 @@ spec:
   freezeDelay: 10s
   
   # For startup resume: Higher priority to resume before frontend
-  startupResumePriority: 1
-  startupResumeDelay: 0s
+  resumePriority: 1
+  resumeDelay: 0s
 
 ---
 apiVersion: apps.ops.dev/v1alpha1
@@ -84,8 +84,8 @@ spec:
   freezeDelay: 20s
   
   # For startup resume: Highest priority to resume first
-  startupResumePriority: 1
-  startupResumeDelay: 0s
+  resumePriority: 1
+  resumeDelay: 0s
   
   # Optional: Custom termination grace period for graceful shutdown
   terminationGracePeriodSeconds:
@@ -108,8 +108,8 @@ spec:
   freezePriority: 0
   freezeDelay: 5s  # Small stagger within same priority
   
-  startupResumePriority: 100
-  startupResumeDelay: 0s
+  resumePriority: 100
+  resumeDelay: 0s
 
 ---
 # Example: Label selector to freeze specific workloads only
@@ -132,5 +132,5 @@ spec:
   freezePriority: 0
   freezeDelay: 0s
   
-  startupResumePriority: 50
-  startupResumeDelay: 0s
+  resumePriority: 50
+  resumeDelay: 0s

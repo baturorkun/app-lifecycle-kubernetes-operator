@@ -420,6 +420,30 @@ spec:
                     minimum: 0
                     type: integer
                 type: object
+              resumeDelay:
+                default: 0s
+                description: |-
+                  resumeDelay specifies how long to wait before starting a Resume operation.
+                  Applies to both startup resume (startupPolicy: Resume) and node failure recovery.
+                  Does NOT apply to manual Resume operations (action: Resume) or Freeze operations.
+                  Useful for staggering multiple namespace resume operations to prevent simultaneous
+                  resume bursts that could overload nodes.
+                  Default: 0s (no delay)
+                type: string
+              resumePriority:
+                default: 100
+                description: |-
+                  resumePriority defines the priority order for resume operations.
+                  Lower numbers have higher priority (e.g., 1 is processed before 2).
+                  Applies to both startup resume (startupPolicy: Resume) and node failure recovery.
+                  If not specified, default priority is 100 (processed after all specified priorities).
+                  Policies with the same priority are processed concurrently.
+                  When combined with resumeDelay, policies are processed in priority order,
+                  and each policy waits for its delay and resume completion before the next priority starts.
+                format: int32
+                maximum: 99999
+                minimum: 1
+                type: integer
               selector:
                 description: |-
                   selector is a label selector to filter which Deployments and StatefulSets
@@ -527,30 +551,6 @@ spec:
                 - Resume
                 - Freeze
                 type: string
-              startupResumeDelay:
-                default: 0s
-                description: |-
-                  startupResumeDelay specifies how long to wait before starting a startup Resume operation.
-                  ONLY applies to startup resume operations (startupPolicy: Resume).
-                  Does NOT apply to manual Resume operations (action: Resume) or Freeze operations.
-                  Useful for staggering multiple namespace resume operations during cluster startup
-                  to prevent simultaneous resume bursts that could overload nodes.
-                  Default: 0s (no delay)
-                type: string
-              startupResumePriority:
-                default: 100
-                description: |-
-                  startupResumePriority defines the priority order for startup resume operations.
-                  Lower numbers have higher priority (e.g., 1 is processed before 2).
-                  Only applies when startupPolicy is Resume.
-                  If not specified, default priority is 100 (processed after all specified priorities).
-                  Policies with the same priority are processed in creation order (older first).
-                  When combined with startupResumeDelay, policies are processed in priority order,
-                  and each policy waits for its delay and resume completion before the next priority starts.
-                format: int32
-                maximum: 99999
-                minimum: 1
-                type: integer
               targetNamespace:
                 description: |-
                   targetNamespace specifies the name of the namespace to which this policy applies.
@@ -845,6 +845,12 @@ spec:
                     description: passed indicates all pre-conditions have passed
                     type: boolean
                 type: object
+              resumeDelayStartedAt:
+                description: |-
+                  resumeDelayStartedAt stores the timestamp when the resume delay began
+                  Used in conjunction with pendingStartupResume to calculate remaining delay time
+                format: date-time
+                type: string
               startupNodesWaited:
                 description: startupNodesWaited records how many seconds we waited
                   for nodes during startup
@@ -855,12 +861,6 @@ spec:
                   startup action was applied
                 format: int32
                 type: integer
-              startupResumeDelayStartedAt:
-                description: |-
-                  startupResumeDelayStartedAt stores the timestamp when the startup resume delay began
-                  Used in conjunction with pendingStartupResume to calculate remaining delay time
-                format: date-time
-                type: string
             type: object
         required:
         - spec

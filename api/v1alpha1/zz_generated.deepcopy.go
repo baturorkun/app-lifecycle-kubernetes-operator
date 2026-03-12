@@ -203,7 +203,7 @@ func (in *NamespaceLifecyclePolicySpec) DeepCopyInto(out *NamespaceLifecyclePoli
 		*out = new(StartupNodeReadinessPolicy)
 		(*in).DeepCopyInto(*out)
 	}
-	out.StartupResumeDelay = in.StartupResumeDelay
+	out.ResumeDelay = in.ResumeDelay
 	out.FreezeDelay = in.FreezeDelay
 	if in.AdaptiveThrottling != nil {
 		in, out := &in.AdaptiveThrottling, &out.AdaptiveThrottling
@@ -274,8 +274,8 @@ func (in *NamespaceLifecyclePolicyStatus) DeepCopyInto(out *NamespaceLifecyclePo
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
-	if in.StartupResumeDelayStartedAt != nil {
-		in, out := &in.StartupResumeDelayStartedAt, &out.StartupResumeDelayStartedAt
+	if in.ResumeDelayStartedAt != nil {
+		in, out := &in.ResumeDelayStartedAt, &out.ResumeDelayStartedAt
 		*out = (*in).DeepCopy()
 	}
 	if in.FreezeDelayStartedAt != nil {

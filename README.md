@@ -14,8 +14,8 @@ When the operator starts (restart, node reboot, upgrade):
 - **Smart Reconciliation**: Only applies action if current state differs from desired state
 - **Idempotent**: Safe to run multiple times, won't duplicate operations
 - **Status Tracking**: Records timestamp and action in resource status
-- **Priority-Based Processing**: Control the order of startup resume operations using `startupResumePriority`
-- **Delayed Startup Resume**: Stagger multiple namespace resume operations using `startupResumeDelay` to prevent cluster overload
+- **Priority-Based Processing**: Control the order of startup resume operations using `resumePriority`
+- **Delayed Startup Resume**: Stagger multiple namespace resume operations using `resumeDelay` to prevent cluster overload
 - **Parallel Processing**: Policies with the same priority are processed in parallel for faster startup
 
 ### 🎫 Operation Idempotency
@@ -63,8 +63,8 @@ Example:
 ```yaml
 spec:
   startupPolicy: Resume
-  startupResumePriority: 1      # Higher priority (processed first)
-  startupResumeDelay: 30s       # Wait 30 seconds before starting resume
+  resumePriority: 1      # Higher priority (processed first)
+  resumeDelay: 30s       # Wait 30 seconds before starting resume
 ```
 
 **Processing Flow:**
@@ -221,8 +221,8 @@ spec:
   action: Resume
   operationId: "op-20231215-002"
   startupPolicy: Resume
-  startupResumePriority: 1      # High priority (processed first)
-  startupResumeDelay: 0s        # Start immediately
+  resumePriority: 1      # High priority (processed first)
+  resumeDelay: 0s        # Start immediately
 ```
 
 This will:
@@ -243,8 +243,8 @@ metadata:
 spec:
   targetNamespace: production
   startupPolicy: Resume
-  startupResumePriority: 1
-  startupResumeDelay: 0s
+  resumePriority: 1
+  resumeDelay: 0s
 
 ---
 # Staging namespace - lower priority, 30s delay
@@ -255,8 +255,8 @@ metadata:
 spec:
   targetNamespace: staging
   startupPolicy: Resume
-  startupResumePriority: 2
-  startupResumeDelay: 30s
+  resumePriority: 2
+  resumeDelay: 30s
 
 ---
 # Development namespace - lowest priority, 60s delay
@@ -267,8 +267,8 @@ metadata:
 spec:
   targetNamespace: dev
   startupPolicy: Resume
-  startupResumePriority: 3
-  startupResumeDelay: 60s
+  resumePriority: 3
+  resumeDelay: 60s
 ```
 
 This will:
@@ -447,8 +447,8 @@ This will:
 | `action` | enum | Yes | `Freeze` or `Resume` |
 | `operationId` | string | No | Unique ID for operation idempotency |
 | `startupPolicy` | enum | Yes | `Ignore`, `Freeze`, or `Resume` - action on operator startup |
-| `startupResumePriority` | int32 | No | Priority order for startup resume operations (lower = higher priority, default: 100, min: 1, max: 1000) |
-| `startupResumeDelay` | Duration | No | Delay before starting startup resume operation (default: 0s, only applies to startupPolicy: Resume) |
+| `resumePriority` | int32 | No | Priority order for startup resume operations (lower = higher priority, default: 100, min: 1, max: 1000) |
+| `resumeDelay` | Duration | No | Delay before starting startup resume operation (default: 0s, only applies to startupPolicy: Resume) |
 | `selector` | LabelSelector | No | Filter resources by labels (all if omitted) |
 | `balancePods` | boolean | No | Enable automatic pod redistribution when nodes become Ready (default: false) |
 | `balanceWindowSeconds` | int32 | No | Time window in seconds for pod balancing after resume (default: 600, max: 3600) |
@@ -500,10 +500,10 @@ When the operator starts, it checks each policy's `startupPolicy`:
 | `Resume` | `Frozen` | Resume namespace ▶️ |
 
 **Processing Order:**
-1. Policies are sorted by `startupResumePriority` (lower number = higher priority)
+1. Policies are sorted by `resumePriority` (lower number = higher priority)
 2. Policies with the same priority are sorted by creation timestamp (older first)
 3. Policies with the same priority are processed in parallel
-4. Each policy waits for its `startupResumeDelay` (if configured)
+4. Each policy waits for its `resumeDelay` (if configured)
 5. Each policy waits for its resume operation to complete
 6. All policies in a priority group must complete before the next priority group starts
 
