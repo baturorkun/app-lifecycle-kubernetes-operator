@@ -636,7 +636,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 
 			if blockPriorityChain {
 				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, policy, true); err != nil {
+				if err := r.waitForPreConditions(ctx, policy, true, appsv1alpha1.LifecycleActionResume); err != nil {
 					// Check if cancelled due to Freeze action
 					if strings.Contains(err.Error(), "cancelled") {
 						log.Info("Pre-conditions cancelled - action changed, returning to let reconcile handle new action")
@@ -663,7 +663,7 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 				log.Info("Pre-conditions enabled in non-blocking mode - checking once",
 					"policy", policy.Name)
 
-				allPassed, message, checkErr := r.checkPreConditions(ctx, policy)
+				allPassed, message, checkErr := r.checkPreConditions(ctx, policy, appsv1alpha1.LifecycleActionResume)
 				if checkErr != nil {
 					log.Error(checkErr, "Failed to check pre-conditions during startup (non-blocking mode)")
 					// Update status with retry to handle conflicts
@@ -1188,7 +1188,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 					if blockPriorityChain {
 						// Blocking mode: wait for pre-conditions synchronously
-						if err := r.waitForPreConditions(ctx, &policy, true); err != nil {
+						if err := r.waitForPreConditions(ctx, &policy, true, appsv1alpha1.LifecycleActionResume); err != nil {
 							// Check if cancelled due to Freeze action
 							if strings.Contains(err.Error(), "cancelled") {
 								log.Info("Pre-conditions cancelled during delayed startup resume - action changed")
@@ -1237,7 +1237,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 						log.Info("Pre-conditions enabled in non-blocking mode (delayed) - checking once",
 							"policy", policy.Name)
 
-						allPassed, message, checkErr := r.checkPreConditions(ctx, &policy)
+						allPassed, message, checkErr := r.checkPreConditions(ctx, &policy, appsv1alpha1.LifecycleActionResume)
 						if checkErr != nil {
 							log.Error(checkErr, "Failed to check pre-conditions during delayed startup (non-blocking mode)")
 							// Update status but don't fail - let reconcile loop retry
@@ -1585,7 +1585,6 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 			// DO NOT set LastHandledOperationId - we want to retry when namespace is created
 			if err := r.updateStatus(ctx, &policy, appsv1alpha1.PhaseFailed, errMsg, false); err != nil {
 				log.Error(err, "Failed to update status")
-				return ctrl.Result{}, err
 			}
 
 			// Don't return error - namespace not existing is an expected state
@@ -1606,7 +1605,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 	// This handles the case where startupPolicy=Resume but action=Freeze, and pre-conditions are still being checked
 	if policy.Status.PreConditionsStatus != nil && policy.Status.PreConditionsStatus.Checking {
 		// Check pre-conditions
-		allPassed, message, err := r.checkPreConditions(ctx, &policy)
+		allPassed, message, err := r.checkPreConditions(ctx, &policy, appsv1alpha1.LifecycleActionResume)
 		if err != nil {
 			log.Error(err, "Failed to check pre-conditions")
 			// Update status with retry - might be temporary error
@@ -1893,7 +1892,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 			if blockPriorityChain {
 				// Blocking mode: wait for pre-conditions synchronously
-				if err := r.waitForPreConditions(ctx, &policy, false); err != nil {
+				if err := r.waitForPreConditions(ctx, &policy, false, appsv1alpha1.LifecycleActionResume); err != nil {
 					// Check if cancelled due to action change (e.g., Freeze)
 					if strings.Contains(err.Error(), "cancelled") {
 						log.Info("Pre-conditions cancelled - action changed, requeuing to handle new action")
@@ -1919,7 +1918,7 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				log.Info("All pre-conditions passed, proceeding with resume")
 			} else {
 				// Non-blocking mode: check pre-conditions once, requeue if not ready
-				allPassed, message, err := r.checkPreConditions(ctx, &policy)
+				allPassed, message, err := r.checkPreConditions(ctx, &policy, appsv1alpha1.LifecycleActionResume)
 				if err != nil {
 					// Fatal error - set phase to Failed
 					if strings.Contains(err.Error(), "timeout") {
@@ -2755,8 +2754,18 @@ func (r *NamespaceLifecyclePolicyReconciler) checkHealthEndpoint(ctx context.Con
 
 // checkPreConditions checks all pre-conditions and returns true if all pass
 // Returns error only for fatal errors (not for conditions not being ready)
-func (r *NamespaceLifecyclePolicyReconciler) checkPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy) (bool, string, error) {
+func (r *NamespaceLifecyclePolicyReconciler) checkPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, action appsv1alpha1.LifecycleAction) (bool, string, error) {
 	log := logf.FromContext(ctx)
+
+	// First, check if priority chain is blocked!
+	isBlocked, blockReason, err := r.isBlockedByHigherPriority(ctx, policy, action)
+	if err != nil {
+		return false, "", fmt.Errorf("failed to check priority blocking: %w", err)
+	}
+	if isBlocked {
+		log.V(1).Info("Priority blocked", "reason", blockReason)
+		return false, blockReason, nil
+	}
 
 	if policy.Spec.PreConditions == nil || !policy.Spec.PreConditions.Enabled {
 		return true, "", nil
@@ -2809,10 +2818,84 @@ func (r *NamespaceLifecyclePolicyReconciler) checkPreConditions(ctx context.Cont
 	return true, "All pre-conditions passed", nil
 }
 
+// isBlockedByHigherPriority checks if a policy is blocked by another higher priority policy.
+func (r *NamespaceLifecyclePolicyReconciler) isBlockedByHigherPriority(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, action appsv1alpha1.LifecycleAction) (bool, string, error) {
+	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
+	if err := r.List(ctx, policyList); err != nil {
+		return false, "", fmt.Errorf("failed to list policies to check priority block: %w", err)
+	}
+
+	for _, p := range policyList.Items {
+		// Skip self
+		if p.UID == policy.UID {
+			continue
+		}
+
+		if action == appsv1alpha1.LifecycleActionResume {
+			// Check if this policy p blocks us from resuming.
+			// It should block if:
+			// 1. It has higher priority (lower number)
+			// 2. It is currently acting on a resume OR pending a resume
+			// 3. It is configured to block the priority chain
+
+			// Default priority is 100
+			ourPriority := policy.Spec.StartupResumePriority
+			if ourPriority == 0 {
+				ourPriority = 100
+			}
+
+			theirPriority := p.Spec.StartupResumePriority
+			if theirPriority == 0 {
+				theirPriority = 100
+			}
+
+			if theirPriority < ourPriority {
+				// Is it blocking?
+				isBlockingPriorityChain := true
+				if p.Spec.PreConditions != nil && p.Spec.PreConditions.BlockPriorityChain != nil && !*p.Spec.PreConditions.BlockPriorityChain {
+					isBlockingPriorityChain = false
+				}
+
+				if isBlockingPriorityChain {
+					// Is it trying to resume?
+					isResuming := p.Status.PendingStartupResume || (p.Spec.Action == appsv1alpha1.LifecycleActionResume && p.Status.Phase != appsv1alpha1.PhaseResumed) || p.Status.Phase == appsv1alpha1.PhaseResuming
+					if isResuming {
+						reason := fmt.Sprintf("Waiting for higher priority policy '%s' (priority %d) to complete resume", p.Name, theirPriority)
+						return true, reason, nil
+					}
+				}
+			}
+		} else if action == appsv1alpha1.LifecycleActionFreeze {
+			// Check if this policy p blocks us from freezing.
+			ourPriority := policy.Spec.FreezePriority
+			theirPriority := p.Spec.FreezePriority
+
+			if theirPriority < ourPriority {
+				// Is it blocking?
+				isBlockingPriorityChain := true
+				if p.Spec.PreConditions != nil && p.Spec.PreConditions.BlockPriorityChain != nil && !*p.Spec.PreConditions.BlockPriorityChain {
+					isBlockingPriorityChain = false
+				}
+
+				if isBlockingPriorityChain {
+					// Is it trying to freeze?
+					isFreezing := p.Status.PendingFreeze || (p.Spec.Action == appsv1alpha1.LifecycleActionFreeze && p.Status.Phase != appsv1alpha1.PhaseFrozen) || p.Status.Phase == appsv1alpha1.PhaseFreezing
+					if isFreezing {
+						reason := fmt.Sprintf("Waiting for higher priority policy '%s' (priority %d) to complete freeze", p.Name, theirPriority)
+						return true, reason, nil
+					}
+				}
+			}
+		}
+	}
+
+	return false, "", nil
+}
+
 // waitForPreConditions waits for all pre-conditions to pass
 // Returns error if timeout is reached or fatal error occurs
 // isStartupOperation: if true, ignores spec.action changes (startup operations only respect spec.startupPolicy)
-func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, isStartupOperation bool) error {
+func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Context, policy *appsv1alpha1.NamespaceLifecyclePolicy, isStartupOperation bool, action appsv1alpha1.LifecycleAction) error {
 	log := logf.FromContext(ctx)
 
 	if policy.Spec.PreConditions == nil || !policy.Spec.PreConditions.Enabled {
@@ -2927,8 +3010,8 @@ func (r *NamespaceLifecyclePolicyReconciler) waitForPreConditions(ctx context.Co
 				policy = latestPolicy
 			}
 
-			// Check pre-conditions
-			allPassed, message, err := r.checkPreConditions(ctx, policy)
+			// Check pre-conditions and priority blocking
+			allPassed, message, err := r.checkPreConditions(ctx, policy, action)
 			if err != nil {
 				// Fatal error - stop checking and update status
 				log.Error(err, "⚠️ Pre-conditions check failed with error", "policy", policy.Name)
