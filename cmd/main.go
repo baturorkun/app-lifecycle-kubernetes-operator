@@ -659,16 +659,63 @@ func main() {
 			return nil // Don't fail the manager
 		}
 
-		// Short grace period: when the operator pod is rescheduled after a node failure,
-		// the node-monitor-grace-period (default 40s) means the failed node might not be
-		// marked NotReady yet. Wait a few seconds so the API server reflects the actual state.
-		// This is a best-effort delay — the APIReader still queries live state, but the
-		// kube-controller-manager may not have tainted/marked the node NotReady yet.
-		select {
-		case <-time.After(5 * time.Second):
-		case <-ctx.Done():
-			return nil
+		// On clusters with leader election (production RKE2 etc.), the standby operator
+		// can win the leader lease in ~15s — before kube-controller-manager marks the
+		// failed node as NotReady (default node-monitor-grace-period: 40s).
+		// Poll the node list every 10s for up to 50s. Exit early if a NotReady node is
+		// found; otherwise wait the full 50s to be sure no failure is pending.
+		// On production clusters with leader election (RKE2 etc.), the standby operator
+		// can win the leader lease in ~15s — before kube-controller-manager marks the
+		// failed node as NotReady (default node-monitor-grace-period: 40s).
+		// Poll every 10s for up to 50s. Exit early on any sign of node failure:
+		// either a non-True NodeReady condition OR an unreachable/not-ready taint.
+		{
+			const maxWait = 50 * time.Second
+			const pollInterval = 10 * time.Second
+			deadline := time.Now().Add(maxWait)
+			setupLog.Info("startup node-scan: polling nodes (max 50s, early exit on failure)", "pollInterval", "10s")
+			for {
+				nodeList := &corev1.NodeList{}
+				if err := mgr.GetAPIReader().List(ctx, nodeList); err != nil {
+					setupLog.Error(err, "startup node-scan: failed to list nodes, retrying")
+				} else {
+					for _, node := range nodeList.Items {
+						// Check 1: NodeReady condition
+						readyStatus := corev1.ConditionUnknown
+						for _, cond := range node.Status.Conditions {
+							if cond.Type == corev1.NodeReady {
+								readyStatus = cond.Status
+								break
+							}
+						}
+						// Check 2: unreachable / not-ready taint (applied by kube-controller-manager
+						// at the same time or slightly before the condition update)
+						hasFaultTaint := false
+						for _, taint := range node.Spec.Taints {
+							if taint.Key == "node.kubernetes.io/unreachable" || taint.Key == "node.kubernetes.io/not-ready" {
+								hasFaultTaint = true
+								break
+							}
+						}
+						setupLog.Info("startup node-scan", "node", node.Name, "readyStatus", string(readyStatus), "faultTaint", hasFaultTaint)
+						if readyStatus != corev1.ConditionTrue || hasFaultTaint {
+							setupLog.Info("startup node-scan: unhealthy node detected — running failure scan now", "node", node.Name, "readyStatus", string(readyStatus), "faultTaint", hasFaultTaint)
+							goto runStartup
+						}
+					}
+				}
+				if time.Now().After(deadline) {
+					setupLog.Info("startup node-scan: all nodes healthy after 50s — proceeding normally")
+					break
+				}
+				select {
+				case <-time.After(pollInterval):
+				case <-ctx.Done():
+					return nil
+				}
+			}
 		}
+	runStartup:
 
 		// Apply startup policies
 		if err := applyStartupPolicies(ctx, mgr); err != nil {
