@@ -246,6 +246,7 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 
 	// Create a client
 	k8sClient := mgr.GetClient()
+	apiReader := mgr.GetAPIReader() // bypasses cache — used for node listing to avoid stale state
 
 	// List all NamespaceLifecyclePolicy resources
 	policyList := &appsv1alpha1.NamespaceLifecyclePolicyList{}
@@ -358,8 +359,11 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	// the failed node so that STARTUP RESUME only resumes workloads destined for healthy nodes.
 	// After scale-down the reconcile loop re-resumes via PendingStartupResume=true.
 	// ============================================================================
+	// Use APIReader (direct API server) instead of cached client to get the actual current
+	// node state. When the operator pod is rescheduled after a node failure, the cache
+	// may still show the failed node as Ready before it propagates the NotReady status.
 	nodeList := &corev1.NodeList{}
-	if err := k8sClient.List(ctx, nodeList); err != nil {
+	if err := apiReader.List(ctx, nodeList); err != nil {
 		setupLog.Error(err, "Startup: failed to list nodes for node failure pre-scan — skipping")
 	} else {
 		var failedNodeNames []string
@@ -653,6 +657,17 @@ func main() {
 		if !mgr.GetCache().WaitForCacheSync(ctx) {
 			setupLog.Error(nil, "Failed to wait for cache sync")
 			return nil // Don't fail the manager
+		}
+
+		// Short grace period: when the operator pod is rescheduled after a node failure,
+		// the node-monitor-grace-period (default 40s) means the failed node might not be
+		// marked NotReady yet. Wait a few seconds so the API server reflects the actual state.
+		// This is a best-effort delay — the APIReader still queries live state, but the
+		// kube-controller-manager may not have tainted/marked the node NotReady yet.
+		select {
+		case <-time.After(5 * time.Second):
+		case <-ctx.Done():
+			return nil
 		}
 
 		// Apply startup policies
