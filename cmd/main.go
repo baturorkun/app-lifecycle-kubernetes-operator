@@ -35,6 +35,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -257,8 +258,9 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 
 	// Create reconciler instance to use helper functions
 	reconciler := &controller.NamespaceLifecyclePolicyReconciler{
-		Client: k8sClient,
-		Scheme: mgr.GetScheme(),
+		Client:    k8sClient,
+		Scheme:    mgr.GetScheme(),
+		APIReader: mgr.GetAPIReader(),
 	}
 
 	// Separate freeze and resume policies
@@ -422,6 +424,20 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 	if len(resumePolicies) > 0 {
 		setupLog.Info("🚀 ========== STARTUP RESUME: MARKING POLICIES AS PENDING ==========")
 
+		// Sort ascending so the highest-priority policy (lowest number) is flagged first.
+		// This ensures its reconcile event fires and starts resuming before lower-priority
+		// policies are flagged, so the gate reliably sees it as pending when they check.
+		sort.Slice(resumePolicies, func(i, j int) bool {
+			pi, pj := resumePolicies[i].Spec.ResumePriority, resumePolicies[j].Spec.ResumePriority
+			if pi == 0 {
+				pi = 100
+			}
+			if pj == 0 {
+				pj = 100
+			}
+			return pi < pj
+		})
+
 		for _, policy := range resumePolicies {
 			policyLogger := setupLog.WithValues("policy", policy.Name, "resumePriority", policy.Spec.ResumePriority)
 			if err := reconciler.ApplyStartupPolicy(ctx, policy); err != nil {
@@ -446,12 +462,19 @@ func applyStartupPolicies(ctx context.Context, mgr manager.Manager) error {
 			if p.Status.PreConditionsStatus != nil && p.Status.PreConditionsStatus.Checking {
 				setupLog.Info("🔄 Triggering reconcile for policy with pending pre-conditions",
 					"policy", p.Name)
-				// Update an annotation to trigger the reconcile
-				if p.Annotations == nil {
-					p.Annotations = make(map[string]string)
+				// Re-fetch to get the latest resource version before updating the annotation,
+				// since concurrent status updates (e.g. HandleNodeFailureAtStartup) may have
+				// modified the object and our list copy is stale.
+				latest := &appsv1alpha1.NamespaceLifecyclePolicy{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: p.Name, Namespace: p.Namespace}, latest); err != nil {
+					setupLog.Error(err, "Failed to re-fetch policy for reconcile trigger", "policy", p.Name)
+					continue
 				}
-				p.Annotations["apps.ops.dev/precondition-trigger"] = time.Now().Format(time.RFC3339)
-				if err := k8sClient.Update(ctx, p); err != nil {
+				if latest.Annotations == nil {
+					latest.Annotations = make(map[string]string)
+				}
+				latest.Annotations["apps.ops.dev/precondition-trigger"] = time.Now().Format(time.RFC3339)
+				if err := k8sClient.Update(ctx, latest); err != nil {
 					setupLog.Error(err, "Failed to trigger reconcile for policy", "policy", p.Name)
 				}
 			}
@@ -603,11 +626,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.NamespaceLifecyclePolicyReconciler{
+	mainReconciler := &controller.NamespaceLifecyclePolicyReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		RESTClient: clientset.CoreV1().RESTClient(),
-	}).SetupWithManager(mgr); err != nil {
+		APIReader:  mgr.GetAPIReader(),
+	}
+	if err := mainReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "NamespaceLifecyclePolicy")
 		os.Exit(1)
 	}
@@ -634,6 +659,9 @@ func main() {
 		if err := applyStartupPolicies(ctx, mgr); err != nil {
 			setupLog.Error(err, "Failed to apply startup policies")
 		}
+		// Signal that startup is complete — reconciler may now treat unhandled
+		// operationIds as live manual commands and cancel startup resume if needed.
+		mainReconciler.MarkStartupComplete()
 		return nil
 	})); err != nil {
 		setupLog.Error(err, "unable to add startup policy runnable")

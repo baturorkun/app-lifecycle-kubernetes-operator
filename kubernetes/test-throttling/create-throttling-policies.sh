@@ -129,8 +129,8 @@ spec:
 spec:
   adaptiveThrottling:
     enabled: true
-    initialBatchSize: 6
-    minBatchSize: 2
+    initialBatchSize: 3
+    minBatchSize: 1
     batchInterval: 5
     signalChecks:
       checkNodeReady:

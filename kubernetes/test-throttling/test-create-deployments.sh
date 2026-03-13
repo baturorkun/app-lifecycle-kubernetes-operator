@@ -64,21 +64,53 @@ kubectl create namespace "$NS" 2>/dev/null || echo "Namespace $NS already exists
 
 # === CREATE WORKLOADS ===
 
+STARTUP_DELAY="${STARTUP_DELAY:-30}"
+
 if [[ "$TYPE" == "deployment" ]]; then
     echo ""
-    echo "Creating $NUMBER deployments..."
+    echo "Creating $NUMBER deployments (startup delay: ${STARTUP_DELAY}s)..."
 
     for i in $(seq 1 "$NUMBER"); do
         WORKLOAD_NAME="$NS-deploy-$i"
         echo "  [$i/$NUMBER] Creating deployment: $WORKLOAD_NAME"
 
-        kubectl create deployment "$WORKLOAD_NAME" \
-            --image="$IMAGE" \
-            --replicas="$REPLICAS" \
-            -n "$NS" \
-            --dry-run=client -o yaml | \
-        kubectl label -f - app=test-throttle --overwrite --dry-run=client --local -o yaml | \
-        kubectl apply -f -
+        # Only the first deployment (used as pre-condition target) gets a startup delay
+        if [[ "$i" == "1" ]]; then
+            INITIAL_DELAY="${STARTUP_DELAY}"
+        else
+            INITIAL_DELAY=0
+        fi
+
+        cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: $WORKLOAD_NAME
+  namespace: $NS
+  labels:
+    app: test-throttle
+spec:
+  replicas: $REPLICAS
+  selector:
+    matchLabels:
+      app: test-throttle
+      workload: $WORKLOAD_NAME
+  template:
+    metadata:
+      labels:
+        app: test-throttle
+        workload: $WORKLOAD_NAME
+    spec:
+      containers:
+      - name: app
+        image: $IMAGE
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: ${INITIAL_DELAY}
+          periodSeconds: 3
+EOF
     done
 
 elif [[ "$TYPE" == "statefulset" ]]; then

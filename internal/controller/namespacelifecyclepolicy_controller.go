@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -45,10 +47,45 @@ import (
 )
 
 // NamespaceLifecyclePolicyReconciler reconciles a NamespaceLifecyclePolicy object
+// nodeMetricsCache caches kubelet scrape results so all CRs share one fetch per interval.
+type nodeMetricsCache struct {
+	mu        sync.Mutex
+	signals   []appsv1alpha1.Signal
+	avgCPU    int32
+	avgMem    int32
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+func (c *nodeMetricsCache) get() ([]appsv1alpha1.Signal, int32, int32, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Since(c.fetchedAt) < c.ttl {
+		return c.signals, c.avgCPU, c.avgMem, true
+	}
+	return nil, 0, 0, false
+}
+
+func (c *nodeMetricsCache) set(signals []appsv1alpha1.Signal, avgCPU, avgMem int32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signals = signals
+	c.avgCPU = avgCPU
+	c.avgMem = avgMem
+	c.fetchedAt = time.Now()
+}
+
 type NamespaceLifecyclePolicyReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	RESTClient rest.Interface
+	Scheme           *runtime.Scheme
+	RESTClient       rest.Interface
+	APIReader        client.Reader // bypasses cache — used for priority gate to avoid stale reads
+	nodeMetricsCache nodeMetricsCache
+	// startupComplete is set to true after applyStartupPolicies finishes.
+	// Manual-override cancellation of PendingStartupResume is suppressed until then,
+	// because the reconciler and applyStartupPolicies run concurrently and the reconciler
+	// may see stale operationIds from before the operator started.
+	startupComplete atomic.Bool
 }
 
 const (
@@ -489,6 +526,14 @@ func (r *NamespaceLifecyclePolicyReconciler) ApplyStartupPolicy(ctx context.Cont
 			// Create a patch helper
 			patchBase := latestPolicy.DeepCopy()
 
+			// Acknowledge any pre-existing operationId so it won't be mistaken for a
+			// live manual Freeze command and cancel the startup resume.
+			// If the operator was killed before setting LastHandledOperationId, the stale
+			// operationId would otherwise trigger the manual-override cancellation path.
+			if latestPolicy.Spec.OperationId != "" {
+				latestPolicy.Status.LastHandledOperationId = latestPolicy.Spec.OperationId
+			}
+
 			// Mark as pending startup resume in status
 			latestPolicy.Status.PendingStartupResume = true
 			latestPolicy.Status.ResumeDelayStartedAt = &now
@@ -867,6 +912,16 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 	// Handle pending startup resume with delay using status fields
 	if policy.Status.PendingStartupResume {
+		// Wait for applyStartupPolicies to finish before processing any PendingStartupResume.
+		// Without this gate, a policy that already had PendingStartupResume=true from a
+		// previous run would start resuming before applyStartupPolicies has flagged all
+		// other policies, defeating the priority ordering enforced by isBlockedByHigherPriorityResume.
+		if !r.startupComplete.Load() {
+			log.Info("⏳ Startup not yet complete — waiting before processing PendingStartupResume",
+				"policy", policy.Name)
+			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		}
+
 		// If a node failure is active, cancel the startup resume and fall through to
 		// node failure handling below. Resuming into a partially-failed cluster would
 		// bring up workloads on healthy nodes but leave the failed-node workloads broken.
@@ -901,9 +956,17 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 
 		} else {
 			// 1. Check for manual operation override during startup delay
-			// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId)
-			// Stale actions (already handled) should not block startup resume.
-			isManualPending := !r.shouldSkipOperation(&policy)
+			// Only abort if there's a NEW/PENDING manual operation (spec.operationId != status.lastHandledOperationId).
+			// During startup phase, suppress cancellation: applyStartupPolicies runs concurrently and
+			// the reconciler may see pre-existing operationIds from before the operator started.
+			// Once startup completes, unhandled operationIds are treated as live manual commands.
+			//
+			// NOTE: Do NOT use shouldSkipOperation() here — it also returns false when
+			// PreConditionsStatus.Checking=true, which would wrongly cancel the startup
+			// resume during the pre-condition check loop.
+			isManualPending := policy.Spec.OperationId != "" &&
+				policy.Status.LastHandledOperationId != policy.Spec.OperationId &&
+				r.startupComplete.Load()
 
 			if isManualPending {
 				log.Info("⚠️ Cancelling startup resume due to pending manual operation",
@@ -1032,51 +1095,79 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 						"blockPriorityChain", blockPriorityChain)
 
 					if blockPriorityChain {
-						// Blocking mode: wait for pre-conditions synchronously
-						if err := r.waitForPreConditions(ctx, &policy, true); err != nil {
-							// Check if cancelled due to Freeze action
-							if strings.Contains(err.Error(), "cancelled") {
-								log.Info("Pre-conditions cancelled during delayed startup resume - action changed")
-								return ctrl.Result{Requeue: true}, nil // Requeue to handle new action
+						// Non-blocking check: verify pre-conditions once and requeue if not ready.
+						// The priority gate (isBlockedByHigherPriorityResume) already blocks lower-priority
+						// policies as long as PendingStartupResume=true — we don't need to hold the worker.
+						// Holding the worker causes a deadlock: test2 waits for test1-deploy-1 to be Ready,
+						// but test1 can never resume because the single reconcile worker is stuck on test2.
+						allPassed, message, checkErr := r.checkPreConditions(ctx, &policy)
+						if checkErr != nil {
+							log.Error(checkErr, "Failed to check pre-conditions during delayed startup resume (blockPriorityChain)")
+							now := metav1.Now()
+							policy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{
+								Checking:      true,
+								LastCheckedAt: &now,
+								Passed:        false,
+								Message:       fmt.Sprintf("Error checking pre-conditions: %v", checkErr),
 							}
-							// Check if it's a timeout error
-							if strings.Contains(err.Error(), "timeout") {
-								log.Error(err, "Pre-conditions timeout reached during delayed startup resume")
-								policy.Status.Phase = appsv1alpha1.PhaseFailed
-								policy.Status.Message = fmt.Sprintf("Delayed startup resume failed: pre-conditions timeout: %v", err)
-								policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_TIMEOUT"
-								policy.Status.PendingStartupResume = false
-								if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-									latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
-									if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
-										return getErr
-									}
-									latestPolicy.Status = policy.Status
-									return r.Status().Update(ctx, latestPolicy)
-								}); updateErr != nil {
-									log.Error(updateErr, "Failed to update status")
-								}
-								return ctrl.Result{}, nil // Don't retry on timeout
-							}
-							log.Error(err, "Failed to check pre-conditions during delayed startup resume")
-							policy.Status.Phase = appsv1alpha1.PhaseFailed
-							policy.Status.Message = fmt.Sprintf("Delayed startup resume failed: pre-conditions check failed: %v", err)
-							policy.Status.LastStartupAction = "RESUME_FAILED_PRECONDITIONS_ERROR"
-							policy.Status.PendingStartupResume = false
+							policy.Status.Phase = appsv1alpha1.PhaseResuming
+							policy.Status.PendingStartupResume = true
 							if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 								latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
 								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
 									return getErr
 								}
+								// Preserve LastHandledOperationId from the fresh fetch to avoid overwriting
+								// acknowledgments made by HandleNodeFailureAtStartup or ApplyStartupPolicy.
+								savedHandledOpID := latestPolicy.Status.LastHandledOperationId
 								latestPolicy.Status = policy.Status
+								latestPolicy.Status.LastHandledOperationId = savedHandledOpID
 								return r.Status().Update(ctx, latestPolicy)
 							}); updateErr != nil {
 								log.Error(updateErr, "Failed to update status")
 							}
-							return ctrl.Result{}, err
+							return ctrl.Result{RequeueAfter: time.Duration(policy.Spec.PreConditions.CheckInterval) * time.Second}, nil
 						}
-
+						if !allPassed {
+							log.Info("\u23f3 Pre-conditions check (interval)",
+								"policy", policy.Name,
+								"passed", false,
+								"message", message,
+								"nextCheckIn", fmt.Sprintf("%ds", policy.Spec.PreConditions.CheckInterval))
+							now := metav1.Now()
+							policy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{
+								Checking:      true,
+								LastCheckedAt: &now,
+								Passed:        false,
+								Message:       message,
+							}
+							policy.Status.Phase = appsv1alpha1.PhaseResuming
+							policy.Status.Message = fmt.Sprintf("Waiting for pre-conditions: %s", message)
+							policy.Status.PendingStartupResume = true
+							if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+								latestPolicy := &appsv1alpha1.NamespaceLifecyclePolicy{}
+								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
+									return getErr
+								}
+								// Preserve LastHandledOperationId from the fresh fetch to avoid overwriting
+								// acknowledgments made by HandleNodeFailureAtStartup or ApplyStartupPolicy.
+								savedHandledOpID := latestPolicy.Status.LastHandledOperationId
+								latestPolicy.Status = policy.Status
+								latestPolicy.Status.LastHandledOperationId = savedHandledOpID
+								return r.Status().Update(ctx, latestPolicy)
+							}); updateErr != nil {
+								log.Error(updateErr, "Failed to update status")
+							}
+							return ctrl.Result{RequeueAfter: time.Duration(policy.Spec.PreConditions.CheckInterval) * time.Second}, nil
+						}
 						log.Info("All pre-conditions passed, proceeding with delayed startup resume")
+						now := metav1.Now()
+						policy.Status.PreConditionsStatus = &appsv1alpha1.PreConditionsStatus{
+							Checking:      false,
+							LastCheckedAt: &now,
+							Passed:        true,
+							Message:       "All pre-conditions passed",
+						}
 					} else {
 						// Non-blocking mode: check pre-conditions once, if passed proceed, otherwise return and let reconcile loop handle it
 						log.Info("Pre-conditions enabled in non-blocking mode (delayed) - checking once",
@@ -1102,7 +1193,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
 									return getErr
 								}
+								// Preserve LastHandledOperationId from the fresh fetch to avoid overwriting
+								// acknowledgments made by HandleNodeFailureAtStartup or ApplyStartupPolicy.
+								savedHandledOpID := latestPolicy.Status.LastHandledOperationId
 								latestPolicy.Status = policy.Status
+								latestPolicy.Status.LastHandledOperationId = savedHandledOpID
 								return r.Status().Update(ctx, latestPolicy)
 							}); updateErr != nil {
 								log.Error(updateErr, "Failed to update status")
@@ -1142,7 +1237,11 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 								if getErr := r.Get(ctx, types.NamespacedName{Name: policy.Name, Namespace: policy.Namespace}, latestPolicy); getErr != nil {
 									return getErr
 								}
+								// Preserve LastHandledOperationId from the fresh fetch to avoid overwriting
+								// acknowledgments made by HandleNodeFailureAtStartup or ApplyStartupPolicy.
+								savedHandledOpID := latestPolicy.Status.LastHandledOperationId
 								latestPolicy.Status = policy.Status
+								latestPolicy.Status.LastHandledOperationId = savedHandledOpID
 								return r.Status().Update(ctx, latestPolicy)
 							}); updateErr != nil {
 								log.Error(updateErr, "Failed to update status")
@@ -2349,7 +2448,11 @@ func (r *NamespaceLifecyclePolicyReconciler) isBlockedByHigherPriorityResume(
 	policy *appsv1alpha1.NamespaceLifecyclePolicy,
 ) (bool, error) {
 	var allPolicies appsv1alpha1.NamespaceLifecyclePolicyList
-	if err := r.List(ctx, &allPolicies); err != nil {
+	// Use APIReader (bypasses cache) to get the freshest state.
+	// The cache can lag during rapid sequential status updates (e.g. startup),
+	// causing a lower-priority policy to pass the gate before higher-priority
+	// policies have their PendingStartupResume reflected in the cache.
+	if err := r.APIReader.List(ctx, &allPolicies); err != nil {
 		return false, err
 	}
 
@@ -2374,6 +2477,12 @@ func (r *NamespaceLifecyclePolicyReconciler) isBlockedByHigherPriorityResume(
 		}
 	}
 	return false, nil
+}
+
+// MarkStartupComplete signals that applyStartupPolicies has finished.
+// After this point, unhandled operationIds are treated as live manual commands.
+func (r *NamespaceLifecyclePolicyReconciler) MarkStartupComplete() {
+	r.startupComplete.Store(true)
 }
 
 // SetupWithManager sets up the controller with the Manager.

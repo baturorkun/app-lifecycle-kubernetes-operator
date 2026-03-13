@@ -364,6 +364,11 @@ func (r *NamespaceLifecyclePolicyReconciler) HandleNodeFailureAtStartup(
 
 	// Set PendingStartupResume=true so the reconcile loop re-resumes workloads
 	// on the surviving nodes once scale-down is complete.
+	// Acknowledge any pre-existing operationId to prevent the stale Freeze command
+	// from cancelling the startup resume in the reconciler's manual-override check.
+	if latest.Spec.OperationId != "" {
+		latest.Status.LastHandledOperationId = latest.Spec.OperationId
+	}
 	latest.Status.PendingStartupResume = true
 	latest.Status.ResumeDelayStartedAt = &handledAt
 

@@ -116,19 +116,31 @@ func (r *NamespaceLifecyclePolicyReconciler) collectSignals(
 
 	// Sinyal 4: Node Usage kontrolü (PROACTIVE - real-time kubelet metrics)
 	if config.SignalChecks.CheckNodeUsage != nil && config.SignalChecks.CheckNodeUsage.Enabled {
-		var scrapeConfig *appsv1alpha1.MetricsScrapeConfig
-		if config.SignalChecks.CheckNodeUsage.Scrape != nil {
-			scrapeConfig = config.SignalChecks.CheckNodeUsage.Scrape
+		// Use cache so all CRs share one kubelet scrape per batchInterval
+		if r.nodeMetricsCache.ttl == 0 {
+			r.nodeMetricsCache.ttl = time.Duration(config.BatchInterval) * time.Second
+			if r.nodeMetricsCache.ttl == 0 {
+				r.nodeMetricsCache.ttl = 5 * time.Second
+			}
 		}
-		usageSignals, avgCPU, avgMem, err := r.checkNodeUsage(
-			ctx,
-			config.NodeSelector,
-			config.SignalChecks.CheckNodeUsage.CPUThresholdPercent,
-			config.SignalChecks.CheckNodeUsage.MemoryThresholdPercent,
-			scrapeConfig,
-		)
-		if err != nil {
-			return signals, metrics, fmt.Errorf("failed to check node usage: %w", err)
+		usageSignals, avgCPU, avgMem, hit := r.nodeMetricsCache.get()
+		if !hit {
+			var scrapeConfig *appsv1alpha1.MetricsScrapeConfig
+			if config.SignalChecks.CheckNodeUsage.Scrape != nil {
+				scrapeConfig = config.SignalChecks.CheckNodeUsage.Scrape
+			}
+			var err error
+			usageSignals, avgCPU, avgMem, err = r.checkNodeUsage(
+				ctx,
+				config.NodeSelector,
+				config.SignalChecks.CheckNodeUsage.CPUThresholdPercent,
+				config.SignalChecks.CheckNodeUsage.MemoryThresholdPercent,
+				scrapeConfig,
+			)
+			if err != nil {
+				return signals, metrics, fmt.Errorf("failed to check node usage: %w", err)
+			}
+			r.nodeMetricsCache.set(usageSignals, avgCPU, avgMem)
 		}
 		signals = append(signals, usageSignals...)
 		metrics.AvgCPUPercent = avgCPU
@@ -386,6 +398,20 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 	// Check EACH NODE separately
 	for _, node := range nodeList.Items {
 		log := logf.FromContext(ctx) // This logger might be framework-polluted, but it's for internal debug
+
+		// Skip NotReady nodes — kubelet is unreachable on failed nodes
+		nodeReady := false
+		for _, cond := range node.Status.Conditions {
+			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+				nodeReady = true
+				break
+			}
+		}
+		if !nodeReady {
+			log.Info("⚠️ Skipping NotReady node for metrics collection", "node", node.Name)
+			continue
+		}
+
 		// Get node allocatable resources
 		allocatableCPU := node.Status.Allocatable.Cpu()
 		allocatableMemory := node.Status.Allocatable.Memory()
@@ -456,6 +482,7 @@ func (r *NamespaceLifecyclePolicyReconciler) checkNodeUsage(
 			// Calculate REAL usage percentages from raw values
 			cpuPercent = int32((usedCPU * 100) / allocatableCPU.MilliValue())
 			memoryPercent = int32((usedMemory * 100) / allocatableMemory.Value())
+			log.Info("📊 Node resource usage", "node", node.Name, "cpu%", cpuPercent, "memory%", memoryPercent)
 		}
 
 		// Accumulate values for average calculation
