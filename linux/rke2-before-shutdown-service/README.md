@@ -1,136 +1,80 @@
-# rke2-pre-shutdown.service ✅
+# rke2-pre-shutdown.service
 
-Short guide for installing and testing the `rke2-pre-shutdown.service` systemd unit used to run a pre-shutdown hook that updates `NamespaceLifecyclePolicy` CRs before a node shuts down.
+Systemd unit that runs a pre-shutdown hook before RKE2 shuts down on a node.
+
+The hook sets `spec.action: Freeze` on all `NamespaceLifecyclePolicy` CRs and then waits until the operator has driven all of them to `status.phase: Frozen` before allowing the shutdown to proceed.
 
 ---
 
-## Purpose 🔧
-- Run a short, idempotent script that informs the operator (via Kubernetes API) that this RKE2 node is shutting down.
-- Ensures `NamespaceLifecyclePolicy` or other cleanup actions can be applied gracefully before the node goes offline.
+## How it works
 
-> Important: The hook must complete quickly — the service includes a 30s start timeout by default (`TimeoutStartSec=30`). Make your script resilient to transient API failures.
+The service uses the `ExecStop` + `RemainAfterExit` pattern:
+
+1. At boot, `ExecStart=/bin/true` marks the service as **active** immediately.
+2. During shutdown, systemd calls `ExecStop` (the actual script) before stopping `rke2-server.service`, because the unit is declared `After=rke2-server.service` (systemd reverses this for stop ordering).
+3. The script patches all CRs to `action=Freeze` and polls `status.phase` until all reach `Frozen` or the timeout expires.
+4. Once the script exits, systemd continues stopping `rke2-server.service` and then proceeds with shutdown.
+
+`TimeoutStopSec=600` gives the operator up to 10 minutes to complete all freeze operations.
 
 ---
 
 ## Files
-- Systemd unit: `linux/rke2-before-shutdown-service/rke2-pre-shutdown.service` (example content below)
-- Hook script (example location): `/usr/local/bin/rke2-pre-shutdown.sh` — this must exist and be executable.
 
-Example unit (from this repo):
-
-```ini
-[Unit]
-Description=Pre-shutdown hook to update NamespaceLifecyclePolicy CRs
-DefaultDependencies=no
-
-# Run BEFORE the system shuts down
-Before=shutdown.target reboot.target halt.target
-
-# Ensure Kubernetes API is still available
-After=network-online.target rke2-server.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/rke2-pre-shutdown.sh
-
-# Do not let the system hang forever
-TimeoutStartSec=30
-
-# systemd waits for this to exit
-RemainAfterExit=yes
-
-[Install]
-WantedBy=shutdown.target reboot.target halt.target
-```
+| File | Destination |
+|---|---|
+| `rke2-pre-shutdown.service` | `/etc/systemd/system/rke2-pre-shutdown.service` |
+| `rke2-pre-shutdown.sh` | `/usr/local/bin/rke2-pre-shutdown.sh` |
 
 ---
 
-## Prerequisites ✅
-- The hook script (`/usr/local/bin/rke2-pre-shutdown.sh`) is present and executable:
+## Installation
 
 ```bash
-sudo install -m 0755 linux/rke2-before-shutdown-service/rke2-pre-shutdown.sh /usr/local/bin/rke2-pre-shutdown.sh
-# or
-sudo cp linux/rke2-before-shutdown-service/rke2-pre-shutdown.sh /usr/local/bin/
-sudo chmod 0755 /usr/local/bin/rke2-pre-shutdown.sh
-```
+# Copy and make script executable
+sudo install -m 0755 linux/rke2-before-shutdown-service/rke2-pre-shutdown.sh \
+  /usr/local/bin/rke2-pre-shutdown.sh
 
-- If the script talks to the Kubernetes API, ensure it has access to a valid kubeconfig (typically via node's service account, or by locating `/etc/rancher/rke2/rke2.yaml` if applicable).
+# Copy unit file
+sudo cp linux/rke2-before-shutdown-service/rke2-pre-shutdown.service \
+  /etc/systemd/system/rke2-pre-shutdown.service
 
-- Systemd (systemd-based Linux distribution) on the RKE2 node.
-
----
-
-## Installation ✨
-1. Copy the unit file to `/etc/systemd/system/`:
-
-```bash
-sudo cp linux/rke2-before-shutdown-service/rke2-pre-shutdown.service /etc/systemd/system/rke2-pre-shutdown.service
-```
-
-2. Reload systemd units:
-
-```bash
+# Reload and enable
 sudo systemctl daemon-reload
-```
-
-3. Enable the unit so it is wanted during shutdown/reboot:
-
-```bash
 sudo systemctl enable rke2-pre-shutdown.service
 ```
 
-> Enabling makes systemd include the unit in the shutdown sequence (it creates symlinks under the appropriate targets).
-
 ---
 
-## Testing 🧪
-- To simulate and test the hook without rebooting the node, run it directly:
+## Testing without rebooting
 
 ```bash
-sudo systemctl start rke2-pre-shutdown.service
-sudo systemctl status -l rke2-pre-shutdown.service
+# Simulate the ExecStop (runs the freeze script directly)
+sudo systemctl stop rke2-pre-shutdown.service
+
+# Check logs
 sudo journalctl -u rke2-pre-shutdown.service --no-pager
-```
+cat /var/log/rke2-pre-shutdown.log
 
-- For a real test, perform a controlled reboot and watch logs on both the node and in cluster (operator/controller logs) to verify the pre-shutdown action executed correctly.
+# Re-arm the service for the next shutdown test
+sudo systemctl start rke2-pre-shutdown.service
+```
 
 ---
 
-## Troubleshooting ⚠️
-- If the hook doesn't run during shutdown, confirm:
-  - The unit is enabled: `systemctl is-enabled rke2-pre-shutdown.service`
-  - There are no typos in the unit installed at `/etc/systemd/system/`
-  - The hook script is executable and exits successfully within 30s
+## Troubleshooting
 
-- Check logs:
-
-```bash
-sudo journalctl -u rke2-pre-shutdown.service -b -u
-```
-
-- If the script needs Kubernetes API access but fails during shutdown, consider:
-  - Using local kubeconfig path (`/etc/rancher/rke2/rke2.yaml`) and proper RBAC
-  - Making the script retry briefly but exit well before the TimeoutStartSec runs out
+- **Service not running during shutdown**: confirm it is enabled (`systemctl is-enabled rke2-pre-shutdown.service`) and that the unit file is correctly installed.
+- **Script fails to reach API**: verify `/etc/rancher/rke2/rke2.yaml` exists and the node's RBAC allows `get`/`patch` on `namespacelifecyclepolicies`.
+- **Shutdown too slow**: reduce `TimeoutStopSec` in the unit file or reduce workload counts managed by the operator.
 
 ---
 
-## Uninstall / Disable ❌
+## Uninstall
 
 ```bash
 sudo systemctl disable rke2-pre-shutdown.service
 sudo rm /etc/systemd/system/rke2-pre-shutdown.service
+sudo rm /usr/local/bin/rke2-pre-shutdown.sh
 sudo systemctl daemon-reload
 ```
-
----
-
-## Notes & Best Practices 💡
-- Keep the hook short and idempotent.
-- Log to stdout/stderr (captured by journalctl) for easy debugging.
-- Prefer marking the node cordoned/draining earlier using normal Kubernetes mechanisms when possible — the pre-shutdown hook is a last-mile step to ensure policy updates occur.
-
----
-
-If you want, I can add a sample `rke2-pre-shutdown.sh` script tailored to this operator's expected behavior (update CRs and ensure safe replica scaling). ⚙️
