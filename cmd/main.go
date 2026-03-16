@@ -53,6 +53,9 @@ import (
 	// +kubebuilder:scaffold:imports
 )
 
+// Version is set at build time via: -ldflags "-X main.Version=v1.2.3"
+var Version = "dev"
+
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
@@ -532,6 +535,8 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	setupLog.Info("starting operator", "version", Version)
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -657,6 +662,50 @@ func main() {
 		if !mgr.GetCache().WaitForCacheSync(ctx) {
 			setupLog.Error(nil, "Failed to wait for cache sync")
 			return nil // Don't fail the manager
+		}
+
+		// Log immediate node status snapshot so we know what the cluster looked like
+		// at the moment the operator became leader — before the 50s scan window.
+		{
+			nodeList := &corev1.NodeList{}
+			if err := mgr.GetAPIReader().List(ctx, nodeList); err != nil {
+				setupLog.Error(err, "startup: failed to list nodes for status snapshot")
+			} else {
+				unhealthyCount := 0
+				for _, node := range nodeList.Items {
+					readyStatus := corev1.ConditionUnknown
+					for _, cond := range node.Status.Conditions {
+						if cond.Type == corev1.NodeReady {
+							readyStatus = cond.Status
+							break
+						}
+					}
+					hasFaultTaint := false
+					for _, taint := range node.Spec.Taints {
+						if taint.Key == "node.kubernetes.io/unreachable" || taint.Key == "node.kubernetes.io/not-ready" {
+							hasFaultTaint = true
+							break
+						}
+					}
+					healthy := readyStatus == corev1.ConditionTrue && !hasFaultTaint
+					if !healthy {
+						unhealthyCount++
+					}
+					setupLog.Info("startup: node status snapshot",
+						"node", node.Name,
+						"readyStatus", string(readyStatus),
+						"faultTaint", hasFaultTaint,
+						"healthy", healthy)
+				}
+				if unhealthyCount > 0 {
+					setupLog.Info("startup: ⚠️  unhealthy nodes detected at startup",
+						"unhealthyCount", unhealthyCount,
+						"totalNodes", len(nodeList.Items))
+				} else {
+					setupLog.Info("startup: ✅ all nodes healthy at startup",
+						"totalNodes", len(nodeList.Items))
+				}
+			}
 		}
 
 		// On clusters with leader election (production RKE2 etc.), the standby operator
