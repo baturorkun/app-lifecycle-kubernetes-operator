@@ -1481,7 +1481,21 @@ func (r *NamespaceLifecyclePolicyReconciler) Reconcile(ctx context.Context, req 
 				"policy", policy.Name)
 
 			if policy.Spec.BalancePods && policy.Status.LastResumeAt != nil {
-				if shouldBalance := r.shouldPerformBalancing(&policy); shouldBalance {
+				// Only balance if the node became Ready AFTER the resume completed.
+				// A node that was already Ready before or during the resume was already
+				// visible to the scheduler while pods were being scaled up — no rolling
+				// restart is needed. This prevents stale NodeReadyEventDetectedAt
+				// timestamps (e.g. from days ago) from triggering balancing immediately
+				// after an unrelated startup resume that freshly set LastResumeAt.
+				nodeEventAfterResume := policy.Status.NodeReadyEventDetectedAt != nil &&
+					policy.Status.NodeReadyEventDetectedAt.After(policy.Status.LastResumeAt.Time)
+
+				if !nodeEventAfterResume {
+					log.Info("⏭️ Skipping pod balancing: node-ready event predates last resume (scheduler was already aware of node)",
+						"policy", policy.Name,
+						"nodeReadyAt", policy.Status.NodeReadyEventDetectedAt,
+						"lastResumeAt", policy.Status.LastResumeAt)
+				} else if shouldBalance := r.shouldPerformBalancing(&policy); shouldBalance {
 					log.Info("✅ Triggering pod balancing",
 						"policy", policy.Name)
 
