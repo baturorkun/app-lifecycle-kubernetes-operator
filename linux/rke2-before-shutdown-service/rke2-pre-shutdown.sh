@@ -50,38 +50,51 @@ for ENTRY in "${CR_ARRAY[@]}"; do
     || log "$(date -Is) WARNING: failed to patch $NS/$CR (continuing)"
 done
 
-# Wait for all CRs to reach Frozen phase
-log "$(date -Is) Waiting up to ${MAX_WAIT_SECONDS}s for all CRs to reach Frozen phase..."
+# Wait for all CRs to reach Frozen phase AND all pods to terminate
+log "$(date -Is) Waiting up to ${MAX_WAIT_SECONDS}s for all CRs to reach Frozen phase and pods to terminate..."
 
 ELAPSED=0
 while [ $ELAPSED -lt $MAX_WAIT_SECONDS ]; do
-  ALL_FROZEN=true
+  ALL_DONE=true
   SUMMARY=""
 
   for ENTRY in "${CR_ARRAY[@]}"; do
     [ -z "$ENTRY" ] && continue
     NS="${ENTRY%%/*}"
     CR="${ENTRY##*/}"
-    PHASE=$(kubectl -n "$NS" get "$CR_KIND" "$CR" \
-      -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
-    SUMMARY="${SUMMARY} ${NS}/${CR}=${PHASE}"
+
+    # Get CR details
+    PHASE=$(kubectl -n "$NS" get "$CR_KIND" "$CR" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+    TARGET_NS=$(kubectl -n "$NS" get "$CR_KIND" "$CR" -o jsonpath='{.spec.targetNamespace}' 2>/dev/null || echo "$NS")
+
     if [ "$PHASE" != "Frozen" ]; then
-      ALL_FROZEN=false
+      ALL_DONE=false
+      SUMMARY="${SUMMARY} ${NS}/${CR}=${PHASE}"
+    else
+      # Phase is Frozen, now check for active pods in target namespace
+      # We exclude pods in terminal states (Succeeded, Failed, Completed)
+      POD_COUNT=$(kubectl -n "$TARGET_NS" get pods --no-headers 2>/dev/null | grep -vE "Succeeded|Failed|Completed" | sed '/^\s*$/d' | wc -l)
+      if [ "$POD_COUNT" -gt 0 ]; then
+        ALL_DONE=false
+        SUMMARY="${SUMMARY} ${TARGET_NS}:pods=${POD_COUNT}"
+      else
+        SUMMARY="${SUMMARY} ${TARGET_NS}:ready"
+      fi
     fi
   done
 
-  if $ALL_FROZEN; then
-    log "$(date -Is) All CRs are Frozen. Done."
+  if $ALL_DONE; then
+    log "$(date -Is) All CRs are Frozen and pods terminated. Done."
     break
   fi
 
-  log "$(date -Is) Not all frozen yet (${ELAPSED}/${MAX_WAIT_SECONDS}s):${SUMMARY}"
+  log "$(date -Is) Waiting (${ELAPSED}/${MAX_WAIT_SECONDS}s):${SUMMARY}"
   sleep $POLL_INTERVAL
   ELAPSED=$((ELAPSED + POLL_INTERVAL))
 done
 
-if ! $ALL_FROZEN; then
-  log "$(date -Is) WARNING: Timed out waiting for all CRs to reach Frozen. Proceeding with shutdown anyway."
+if ! $ALL_DONE; then
+  log "$(date -Is) WARNING: Timed out waiting for all CRs to reach Frozen or pods to terminate. Proceeding with shutdown anyway."
 fi
 
 log "$(date -Is) Pre-shutdown script finished."
